@@ -1598,6 +1598,7 @@ public:
     [[nodiscard]] CaptureDisposition captureOwner(
         std::uint64_t ownerIdentity,
         std::uint64_t mainWindowIdentity,
+        std::uint64_t componentSurfaceOffset = kComponentSurfaceOffset,
         const OwnerToken &observedToken = {});
     void revokeAtDestructorStart(std::uint64_t mainWindowIdentity);
     [[nodiscard]] bool withResolvedCandidate(const OwnerToken &token,
@@ -1617,4 +1618,3 @@ private:
 OwnerBridge &SharedSidebarPatchOwnerBridge();
 
 }
-

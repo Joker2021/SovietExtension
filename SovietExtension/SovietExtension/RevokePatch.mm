@@ -90,7 +90,7 @@ static void YMInstallOpenURLWithSystemBrowserPatch(void);
 typedef enum {
     YMRevokeHookModePointer     = 0,   // 4.1.9：写 off_91EAD20
     YMRevokeHookModeInline      = 1,   // 4.1.10：patch CoReplaceOriginMessageByRevoke 局部 callsite，保留原消息内容
-    YMRevokeHookModeInlineEntry = 2,   // 4.1.11：直接 inline hook ym_HandleSysMsg_RevokeMsg 入口，先保证基础防撤回和灰色提示稳定生效
+    YMRevokeHookModeInlineEntry = 2,   // 兼容模式：直接 inline hook ym_HandleSysMsg_RevokeMsg 入口
 } YMRevokeHookMode;
 
 // CoReplaceOriginMessageByRevoke 局部 callsite 的版本分支。
@@ -419,6 +419,54 @@ static const YMWeChatAdaptProfile YMAdaptProfiles[] = {
 
             .contentOffset = 328,
         },
+    },
+
+    {
+        .displayName = "Mac WeChat 4.1.15 arm64 / 270102",
+
+        .bundleID = "com.tencent.xinWeChat",
+        .shortVersion = "4.1.15",
+        .buildVersion = "270102",
+
+        // 4.1.15 的 MessageWrap 增加了 16 字节；基础会话、时间和正文偏移未变。
+        .hookPointerVA = 0x30C576C,
+        .rawMessageTemplateVA = 0x87203F0,
+        .messageWrapFromRawVA = 0x4B62364,
+        .messageWrapDestructVA = 0xAA4760,
+        .insertPaySysMsgToSessionVA = 0x42E716C,
+
+        .YMMultiOpenTryPreventMultiInstanceVA = 0x26D5E8,
+        .YMGetMainWeixinProcessCountVA = 0,
+
+        // 群成员变更链按 269079 的同源函数逐点匹配；响应捕获仍仅用于 269079。
+        .groupExitDBApplyVA = 0x2A30E40,
+        .groupExitFMessagePreVA = 0x2D60C8C,
+        .groupExitUpdateSessionCacheVA = 0x41F42C8,
+        .groupExitMemberDataListVA = 0x28C8764,
+        .groupExitChatroomInfoOperatorVA = 0x28EB3BC,
+        .revokeOriginCallsiteAfterQueryVA = 0x3418394,
+        .revokeOriginCallsiteContinueVA = 0x34183A4,
+        .revokeOriginCallsiteZeroBranchVA = 0x34183C4,
+        .revokeOriginCallsiteCheckVA = 0,
+        .revokeOriginCallsiteMode = YMRevokeOriginCallsiteModeLegacy410,
+        .revokeOriginOutWrapStackOffset = 0x38,
+        .revokeOriginExtObjectStackOffset = 0x2F0,
+        .revokeDeleteMessagesVA = 0x309252C,
+
+        .openURLWebViewKindVA = 0x21BC064,
+        .sendMsgCGIVA = 0,
+        .roomNameQueryVA = 0x41F14C8,
+        .mediaForward = {0x4B654C0, 0x3830D4, 0x1812DDC, 0x175E348},
+
+        .layout = {
+            .messageWrapSize = 632,
+            .remoteUserOrSessionOffset = 24,
+            .selfUserOffset = 48,
+            .createTimeMsOffset = 256,
+            .createTimeSecOffset = 276,
+            .contentOffset = 328,
+        },
+        .hookMode = YMRevokeHookModeInline,
     },
 
     
@@ -798,7 +846,7 @@ static BOOL YMProfileHasAntiRevokeAddresses(const YMWeChatAdaptProfile *profile)
     }
 
     if (profile->hookMode == YMRevokeHookModeInline) {
-        // 4.1.10 callsite 高级模式：需要 CoReplaceOriginMessageByRevoke 里的局部地址完整。
+        // callsite 完整模式：需要 CoReplaceOriginMessageByRevoke 里的局部地址完整。
         BOOL callsiteOK = profile->revokeOriginCallsiteAfterQueryVA != 0 &&
                           profile->revokeOriginCallsiteContinueVA != 0 &&
                           profile->revokeOriginCallsiteZeroBranchVA != 0 &&
@@ -889,9 +937,14 @@ static const YMWeChatAdaptProfile *YMGetActiveProfile(void) {
     return YMActiveProfile;
 }
 
+static BOOL YMProfileSupportsNativeSelfRevoke(const YMWeChatAdaptProfile *profile) {
+    return profile && (!strcmp(profile->buildVersion, "269079") ||
+                       !strcmp(profile->buildVersion, "270102"));
+}
+
 static BOOL YMShouldInstallRevokeHooks(void) {
     const YMWeChatAdaptProfile *profile = YMGetActiveProfile();
-    return (profile && strcmp(profile->buildVersion, "269079") == 0) || YMIsAntiRevokeEnabled();
+    return YMProfileSupportsNativeSelfRevoke(profile) || YMIsAntiRevokeEnabled();
 }
 
 #pragma mark - 地址辅助
@@ -916,16 +969,12 @@ uintptr_t YMSendMsgCGIRuntimeAddress(void) {
     return YMRuntimeAddress(profile->sendMsgCGIVA);
 }
 
-static BOOL YMMatchesWeChat269079Dylib(void) {
+static BOOL YMMatchesLoadedWeChatDylibUUID(const uint8_t expectedUUID[16]) {
     // 私有 ABI 只适用于已分析的 arm64 样本；版本号相同也可能有不同二进制。
     struct mach_header_64 header = {};
     if (!YMSafeReadMemory(YMWeChatDylibSlide, &header, sizeof(header)) ||
         header.magic != MH_MAGIC_64 || header.cputype != CPU_TYPE_ARM64 ||
         header.sizeofcmds > 1024 * 1024) return NO;
-    static const uint8_t expectedUUID[16] = {
-        0x58, 0x02, 0x94, 0xa4, 0x5a, 0xf5, 0x31, 0x0d,
-        0x9a, 0x9a, 0xc3, 0x63, 0x9b, 0xee, 0x0a, 0x28
-    };
     BOOL matchesUUID = NO;
     size_t offset = sizeof(header);
     size_t end = offset + header.sizeofcmds;
@@ -937,7 +986,7 @@ static BOOL YMMatchesWeChat269079Dylib(void) {
             struct uuid_command uuid = {};
             if (command.cmdsize < sizeof(uuid) ||
                 !YMSafeReadMemory(YMWeChatDylibSlide + offset, &uuid, sizeof(uuid))) return NO;
-            matchesUUID = memcmp(uuid.uuid, expectedUUID, sizeof(expectedUUID)) == 0;
+            matchesUUID = memcmp(uuid.uuid, expectedUUID, 16) == 0;
             break;
         }
         offset += command.cmdsize;
@@ -945,12 +994,43 @@ static BOOL YMMatchesWeChat269079Dylib(void) {
     return matchesUUID;
 }
 
+static BOOL YMMatchesWeChat269079Dylib(void) {
+    static const uint8_t expectedUUID[16] = {
+        0x58, 0x02, 0x94, 0xa4, 0x5a, 0xf5, 0x31, 0x0d,
+        0x9a, 0x9a, 0xc3, 0x63, 0x9b, 0xee, 0x0a, 0x28
+    };
+    return YMMatchesLoadedWeChatDylibUUID(expectedUUID);
+}
+
+static BOOL YMIsWeChat270102Profile(void) {
+    const YMWeChatAdaptProfile *profile = YMGetActiveProfile();
+    return profile && profile->buildVersion && strcmp(profile->buildVersion, "270102") == 0;
+}
+
+static BOOL YMMatchesWeChat270102Dylib(void) {
+    static const uint8_t expectedUUID[16] = {
+        0x3b, 0x7b, 0x6a, 0xbb, 0x2c, 0x36, 0x3e, 0x58,
+        0xa3, 0x84, 0xcd, 0xef, 0x05, 0xa5, 0x7a, 0xa5
+    };
+    return YMMatchesLoadedWeChatDylibUUID(expectedUUID);
+}
+
+static BOOL YMMatchesWeChat270102Entry(uintptr_t staticVA, const uint8_t expected[16]) {
+    if (!YMIsWeChat270102Profile()) return YES;
+    uint8_t actual[16] = {};
+    const uintptr_t address = YMRuntimeAddress(staticVA);
+    return YMMatchesWeChat270102Dylib() && address &&
+           YMSafeReadMemory(address, actual, sizeof(actual)) &&
+           memcmp(actual, expected, sizeof(actual)) == 0;
+}
+
 BOOL YMGetMediaForwardAddresses(YMMediaForwardAddresses *addresses) {
     if (!addresses) return NO;
     *addresses = {};
     const YMWeChatAdaptProfile *profile = YMGetActiveProfile();
-    if (!profile || !profile->mediaForward.fromWrap || !YMWeChatDylibSlide ||
-        !YMMatchesWeChat269079Dylib()) return NO;
+    if (!profile || !profile->mediaForward.fromWrap || !YMWeChatDylibSlide) return NO;
+    const BOOL is270102 = profile->buildVersion && strcmp(profile->buildVersion, "270102") == 0;
+    if (!(is270102 ? YMMatchesWeChat270102Dylib() : YMMatchesWeChat269079Dylib())) return NO;
 
     // 顺序对应转换、析构、单条转发、目标插入；入口被其他 Hook 改写时也拒绝调用。
     static const uint8_t entryBytes[4][16] = {
@@ -977,13 +1057,19 @@ BOOL YMGetMediaForwardAddresses(YMMediaForwardAddresses *addresses) {
 uintptr_t YMMessageDataConstructorRuntimeAddress(void) {
     YMMediaForwardAddresses addresses = {};
     if (!YMGetMediaForwardAddresses(&addresses)) return 0;
-    // 269079 的 MessageData 默认构造器，原生初始化所有 string、shared_ptr 和容器。
+    const BOOL is270102 = YMIsWeChat270102Profile();
+    // MessageData 默认构造器，原生初始化所有 string、shared_ptr 和容器。
     // 独立校验：构造器不匹配只禁用生成通知，不影响已有消息的 +1 与媒体转发。
-    const uintptr_t runtime = YMRuntimeAddress(0x48e0f90);
-    static const uint8_t expected[16] = {
+    const uintptr_t runtime = YMRuntimeAddress(is270102 ? 0x4BFE874 : 0x48E0F90);
+    static const uint8_t expected269079[16] = {
         0x08, 0x2a, 0x02, 0x90, 0x08, 0xe1, 0x14, 0x91,
         0x08, 0x41, 0x00, 0x91, 0x1f, 0x70, 0x02, 0x78
     };
+    static const uint8_t expected270102[16] = {
+        0x08, 0x88, 0x02, 0xf0, 0x08, 0x61, 0x3a, 0x91,
+        0x08, 0x41, 0x00, 0x91, 0x1f, 0x70, 0x02, 0x78
+    };
+    const uint8_t *expected = is270102 ? expected270102 : expected269079;
     uint8_t actual[16] = {};
     if (!runtime || !YMSafeReadMemory(runtime, actual, sizeof(actual)) ||
         memcmp(actual, expected, sizeof(actual)) != 0) return 0;
@@ -1701,7 +1787,7 @@ static BOOL YMInsertLocalAntiRevokeNotice(int64_t rawRevokeMessage) {
     */
     const size_t wrapSize = profile->layout.messageWrapSize;
 
-    alignas(16) uint8_t rawWrap[616];
+    alignas(16) uint8_t rawWrap[640];
     memset(rawWrap, 0, sizeof(rawWrap));
 
     if (wrapSize > sizeof(rawWrap)) {
@@ -1923,8 +2009,9 @@ static_assert(offsetof(YMRoomSessionData, field1E0) == 0x1e0 && offsetof(YMRoomS
 
 static uintptr_t YMRoomNameQueryRuntimeAddress(void) {
     const YMWeChatAdaptProfile *profile = YMGetActiveProfile();
-    if (!profile || !profile->roomNameQueryVA || !YMWeChatDylibSlide ||
-        !YMMatchesWeChat269079Dylib()) return 0;
+    if (!profile || !profile->roomNameQueryVA || !YMWeChatDylibSlide) return 0;
+    const BOOL is270102 = profile->buildVersion && strcmp(profile->buildVersion, "270102") == 0;
+    if (!(is270102 ? YMMatchesWeChat270102Dylib() : YMMatchesWeChat269079Dylib())) return 0;
 
     static const uint8_t expectedEntry[16] = {
         0xf6, 0x57, 0xbd, 0xa9, 0xf4, 0x4f, 0x01, 0xa9,
@@ -1960,7 +2047,7 @@ NSString *YMQueryRoomName(NSString *roomID) {
     }
 }
 
-// Build 269079：仅查原生联系人/群缓存，不调用数据库或等待 future。
+// Build 269079/270102：仅查原生联系人/群缓存，不调用数据库或等待 future。
 // 所有 shared_ptr/optional/string 均以真实 C++ 类型承接 arm64 x8 返回值。
 static BOOL YMGroupExitDisplayNameLooksUseful(NSString *, NSString *);
 static NSString *YMGroupExitTrimDisplayName(NSString *);
@@ -2028,9 +2115,11 @@ static NSString *YMReadCachedMemberName(NSString *memberID, NSString *roomID, NS
 }
 
 static NSString *YMQueryCachedMemberName(NSString *memberID, NSString *roomID, NSString *capturedGroupName) {
-    if (!YMWeChatDylibSlide || !YMMatchesWeChat269079Dylib()) return @"";
-    static const uintptr_t addresses[] = {0x428E5D4, 0x1E58634, 0x39EFD50, 0x47B8684, 0x39F34B8, 0x2167A5C};
-    static const uint8_t entries[6][16] = {
+    const BOOL is270102 = YMIsWeChat270102Profile();
+    if (!YMWeChatDylibSlide || !(is270102 ? YMMatchesWeChat270102Dylib() : YMMatchesWeChat269079Dylib())) return @"";
+    static const uintptr_t addresses269079[] = {0x428E5D4, 0x1E58634, 0x39EFD50, 0x47B8684, 0x39F34B8, 0x2167A5C};
+    static const uintptr_t addresses270102[] = {0x451A950, 0x237ED18, 0x43B2500, 0x4AC9D88, 0x43B5ED4, 0x28FA314};
+    static const uint8_t entries269079[6][16] = {
         {0xff,0xc3,0x00,0xd1,0xf4,0x4f,0x01,0xa9,0xfd,0x7b,0x02,0xa9,0xfd,0x83,0x00,0x91},
         {0xff,0x03,0x01,0xd1,0xf4,0x4f,0x02,0xa9,0xfd,0x7b,0x03,0xa9,0xfd,0xc3,0x00,0x91},
         {0xff,0x03,0x01,0xd1,0xf6,0x57,0x01,0xa9,0xf4,0x4f,0x02,0xa9,0xfd,0x7b,0x03,0xa9},
@@ -2038,6 +2127,16 @@ static NSString *YMQueryCachedMemberName(NSString *memberID, NSString *roomID, N
         {0xf6,0x57,0xbd,0xa9,0xf4,0x4f,0x01,0xa9,0xfd,0x7b,0x02,0xa9,0xfd,0x83,0x00,0x91},
         {0xff,0x03,0x01,0xd1,0xf6,0x57,0x01,0xa9,0xf4,0x4f,0x02,0xa9,0xfd,0x7b,0x03,0xa9}
     };
+    static const uint8_t entries270102[6][16] = {
+        {0xff,0xc3,0x00,0xd1,0xf4,0x4f,0x01,0xa9,0xfd,0x7b,0x02,0xa9,0xfd,0x83,0x00,0x91},
+        {0xff,0x03,0x01,0xd1,0xf4,0x4f,0x02,0xa9,0xfd,0x7b,0x03,0xa9,0xfd,0xc3,0x00,0x91},
+        {0xff,0x03,0x01,0xd1,0xf6,0x57,0x01,0xa9,0xf4,0x4f,0x02,0xa9,0xfd,0x7b,0x03,0xa9},
+        {0x00,0x80,0x01,0x91,0xa3,0xdf,0xfc,0x17,0xf4,0x4f,0xbe,0xa9,0xfd,0x7b,0x01,0xa9},
+        {0xf6,0x57,0xbd,0xa9,0xf4,0x4f,0x01,0xa9,0xfd,0x7b,0x02,0xa9,0xfd,0x83,0x00,0x91},
+        {0xff,0x03,0x01,0xd1,0xf6,0x57,0x01,0xa9,0xf4,0x4f,0x02,0xa9,0xfd,0x7b,0x03,0xa9}
+    };
+    const uintptr_t *addresses = is270102 ? addresses270102 : addresses269079;
+    const uint8_t (*entries)[16] = is270102 ? entries270102 : entries269079;
     uintptr_t functions[6] = {};
     for (size_t i = 0; i < 6; ++i) {
         functions[i] = YMRuntimeAddress(addresses[i]);
@@ -2047,8 +2146,10 @@ static NSString *YMQueryCachedMemberName(NSString *memberID, NSString *roomID, N
     static const uint8_t nicknameRead[16] = {0xe9,0x5f,0x40,0xf9,0xa9,0x00,0x00,0xb4,0x21,0xa1,0x02,0x91,0xe0,0x03,0x13,0xaa};
     uint8_t bytes[16];
     uintptr_t app = 0;
-    if (!YMSafeReadMemory(YMRuntimeAddress(0x22320D8), bytes, 16) || memcmp(bytes, nicknameRead, 16) ||
-        !YMSafeReadPointer(YMRuntimeAddress(0x9312568), &app) || !app) return @"";
+    const uintptr_t nicknameReadAddress = is270102 ? 0x29CD554 : 0x22320D8;
+    const uintptr_t appPointerAddress = is270102 ? 0xA29B988 : 0x9312568;
+    if (!YMSafeReadMemory(YMRuntimeAddress(nicknameReadAddress), bytes, 16) || memcmp(bytes, nicknameRead, 16) ||
+        !YMSafeReadPointer(YMRuntimeAddress(appPointerAddress), &app) || !app) return @"";
     return YMReadCachedMemberName(memberID, roomID, capturedGroupName, functions);
 }
 
@@ -3637,6 +3738,22 @@ static BOOL YMPatchGroupExitMonitorWithSlide(intptr_t slide, NSString *source) {
               (unsigned long)YMWeChatDylibSlide);
         return NO;
     }
+    if (YMIsWeChat270102Profile()) {
+        static const struct { uintptr_t address; uint8_t bytes[16]; } entries[] = {
+            {0x2A30E40, {0xfc,0x6f,0xba,0xa9,0xfa,0x67,0x01,0xa9,0xf8,0x5f,0x02,0xa9,0xf6,0x57,0x03,0xa9}},
+            {0x2D60C8C, {0xfc,0x6f,0xba,0xa9,0xfa,0x67,0x01,0xa9,0xf8,0x5f,0x02,0xa9,0xf6,0x57,0x03,0xa9}},
+            {0x41F42C8, {0xfc,0x6f,0xba,0xa9,0xfa,0x67,0x01,0xa9,0xf8,0x5f,0x02,0xa9,0xf6,0x57,0x03,0xa9}},
+            {0x28C8764, {0xfc,0x6f,0xba,0xa9,0xfa,0x67,0x01,0xa9,0xf8,0x5f,0x02,0xa9,0xf6,0x57,0x03,0xa9}},
+            {0x28EB3BC, {0xfc,0x6f,0xbb,0xa9,0xf8,0x5f,0x01,0xa9,0xf6,0x57,0x02,0xa9,0xf4,0x4f,0x03,0xa9}},
+        };
+        for (const auto &entry : entries) {
+            if (!YMMatchesWeChat270102Entry(entry.address, entry.bytes)) {
+                YMLog(@"[GroupExitMonitor] 270102 ABI fingerprint mismatch at 0x%lx; skip",
+                      (unsigned long)entry.address);
+                return NO;
+            }
+        }
+    }
 
     uintptr_t dbApplyTarget = YMRuntimeAddress(profile->groupExitDBApplyVA);
     uintptr_t fmessagePreTarget = YMRuntimeAddress(profile->groupExitFMessagePreVA);
@@ -4170,7 +4287,9 @@ NSString *YMBuildSelfRevokeNotice(uintptr_t originalWrap, uintptr_t revokeExt) {
     // native string reader so long messages still produce the existing 1200-char summary.
     NSString *content = YMNSStringFromLibcppStringObject((const void *)(originalWrap + 0x130), 262144);
     if (!content) return nil;
-    NSString *replaceMsg = revokeExt ? YMNSStringFromLibcppStringObject((const void *)(revokeExt + 0x170)) : @"";
+    const YMWeChatAdaptProfile *profile = YMGetActiveProfile();
+    const size_t replaceMsgOffset = profile && !strcmp(profile->buildVersion, "270102") ? 0x1D0 : 0x170;
+    NSString *replaceMsg = revokeExt ? YMNSStringFromLibcppStringObject((const void *)(revokeExt + replaceMsgOffset)) : @"";
     NSString *displayName = YMDisplayNameFromRevokeReplaceMsg(replaceMsg);
     if (!displayName.length) displayName = @"你";
     return YMBuildDetailedAntiRevokeNotice(type, content, createTimeMs, createTimeSec,
@@ -4196,6 +4315,11 @@ void YMRecordRetainedSelfRevoke(NSString *identity, uint32_t noticeLocalId) {
 }
 
 uint64_t YMRetainedSelfRevokeOriginalID(uintptr_t systemWrap) {
+    const YMWeChatAdaptProfile *profile = YMGetActiveProfile();
+    if (!YMProfileSupportsNativeSelfRevoke(profile)) return 0;
+    const BOOL is270102 = !strcmp(profile->buildVersion, "270102");
+    const size_t rawExtOffset = is270102 ? 0x220 : 0x210;
+    const size_t extTypeOffset = is270102 ? 0x1A8 : 0x148;
     uint64_t serverID = 0;
     uint32_t localID = 0, type = 0;
     uintptr_t ext = 0;
@@ -4203,8 +4327,8 @@ uint64_t YMRetainedSelfRevokeOriginalID(uintptr_t systemWrap) {
         !YMSafeReadMemory(systemWrap + 0xF8, &serverID, sizeof(serverID)) || serverID != 0 ||
         !YMSafeReadMemory(systemWrap + 0xF4, &localID, sizeof(localID)) || !localID ||
         !YMSafeReadMemory(systemWrap + 0x0C, &type, sizeof(type)) || type != 10000 ||
-        !YMSafeReadPointer(systemWrap + 0x210, &ext) || !ext ||
-        ![YMNSStringFromLibcppStringObject((void *)(ext + 0x148)) isEqualToString:@"revokemsg"]) return 0;
+        !YMSafeReadPointer(systemWrap + rawExtOffset, &ext) || !ext ||
+        ![YMNSStringFromLibcppStringObject((void *)(ext + extTypeOffset)) isEqualToString:@"revokemsg"]) return 0;
     // 原生重建提示 XML 不包含原消息 ID；以持久化提示身份关联，不能读 ext+0x168。
     return YMSelfRevokeOriginalID(NSUserDefaults.standardUserDefaults, YMSelfRevokeAccount(),
                                   YMSelfRevokeSession(systemWrap), localID);
@@ -4216,7 +4340,7 @@ bool YMIsSelfRevokeNotice(uintptr_t systemWrap) {
 
 BOOL YMIsRetainedSelfMessage(uintptr_t messageData) {
     const YMWeChatAdaptProfile *profile = YMGetActiveProfile();
-    if (!messageData || !profile || strcmp(profile->buildVersion, "269079") != 0) return NO;
+    if (!messageData || !YMProfileSupportsNativeSelfRevoke(profile)) return NO;
     uint64_t serverID = 0;
     uint32_t localID = 0;
     if (!YMSafeReadMemory(messageData + 0x90, &serverID, sizeof(serverID)) ||
@@ -4232,7 +4356,8 @@ BOOL YMIsRetainedSelfMessage(uintptr_t messageData) {
 extern "C" void YMRevokeOriginCallsiteHelper(uintptr_t originalSP, uintptr_t savedRegs) {
     @autoreleasepool {
         const YMWeChatAdaptProfile *profile = YMGetActiveProfile();
-        const BOOL supportedSelf = profile && strcmp(profile->buildVersion, "269079") == 0;
+        const BOOL supportedSelf = YMProfileSupportsNativeSelfRevoke(profile);
+        const BOOL is270102 = supportedSelf && !strcmp(profile->buildVersion, "270102");
         const YMRevokeSettings policy = YMReadRevokeSettings(NSUserDefaults.standardUserDefaults);
         if (!(supportedSelf ? policy.enabled : YMIsAntiRevokeEnabled())) {
             YMRevokeDeleteGuardActive = NO;
@@ -4248,7 +4373,8 @@ extern "C" void YMRevokeOriginCallsiteHelper(uintptr_t originalSP, uintptr_t sav
         YMSafeReadPointer(originalSP + extObjectSlotOffset, &extObject);
 
         uint8_t hasValue = 0;
-        YMSafeReadMemory(outWrap + 616, &hasValue, sizeof(hasValue));
+        const size_t optionalOffset = profile ? profile->layout.messageWrapSize : 616;
+        YMSafeReadMemory(outWrap + optionalOffset, &hasValue, sizeof(hasValue));
 
         YMLog(@"[RevokeCallsite] after GetMessageBySvrId originalSP=0x%lx outWrap=0x%lx dstOff=0x%lx has=%u ext=0x%lx extOff=0x%lx",
               (unsigned long)originalSP,
@@ -4280,7 +4406,7 @@ extern "C" void YMRevokeOriginCallsiteHelper(uintptr_t originalSP, uintptr_t sav
                                                                    YMSelfRevokeWrapIdentity(outWrap));
                 if (!YMPrepareSelfRevoke(originalSP, retain)) {
                     // 不允许注册失败后销毁用户要求保留的原消息。
-                    if (retain) *((volatile uint8_t *)(outWrap + 616)) = 0;
+                    if (retain) *((volatile uint8_t *)(outWrap + optionalOffset)) = 0;
                     YMLog(@"[SelfRevoke] event unavailable; retain=%d native reedit not guaranteed", retain);
                     return;
                 }
@@ -4291,10 +4417,12 @@ extern "C" void YMRevokeOriginCallsiteHelper(uintptr_t originalSP, uintptr_t sav
         }
 
         uint64_t svrId = 0;
-        YMSafeReadMemory(extObject + 360, &svrId, sizeof(svrId));
+        const size_t extServerIDOffset = is270102 ? 0x1C8 : 0x168;
+        const size_t extSessionOffset = is270102 ? 0x1E8 : 0x188;
+        YMSafeReadMemory(extObject + extServerIDOffset, &svrId, sizeof(svrId));
 
-        std::string *sessionString = (std::string *)(extObject + 392);
-        NSString *sessionText = YMNSStringFromLibcppStringObject((const void *)(extObject + 392));
+        std::string *sessionString = (std::string *)(extObject + extSessionOffset);
+        NSString *sessionText = YMNSStringFromLibcppStringObject((const void *)(extObject + extSessionOffset));
 
         uint32_t originType = 0;
         uint32_t originType12 = 0;
@@ -4424,7 +4552,7 @@ extern "C" void YMRevokeOriginCallsiteHelper(uintptr_t originalSP, uintptr_t sav
         if (own) return; // 本人路径只由已冻结的原生删除/替换策略控制。
 
         // 他人防撤回继续沿用现有本地提示与保留路径。
-        *((volatile uint8_t *)(outWrap + 616)) = 0;
+        *((volatile uint8_t *)(outWrap + optionalOffset)) = 0;
         YMLog(@"[RevokeCallsite] clear local origin optional flag to prevent current UI revoke replacement");
     }
 }
@@ -4665,7 +4793,7 @@ static BOOL YMPatchRevokeLocalCallsiteOnly(uintptr_t slide, NSString *source) {
         return NO;
     }
 
-    const BOOL nativeSelf = strcmp(profile->buildVersion, "269079") == 0;
+    const BOOL nativeSelf = YMProfileSupportsNativeSelfRevoke(profile);
     if (nativeSelf) return YMInstallSelfRevokePatch();
 
     uintptr_t callsite = slide + profile->revokeOriginCallsiteAfterQueryVA;
@@ -4748,6 +4876,22 @@ static BOOL YMPatchAntiRevokeWithSlide(intptr_t slide, NSString *source) {
               profile->displayName,
               (unsigned long)YMWeChatDylibSlide);
         return NO;
+    }
+
+    if (YMIsWeChat270102Profile()) {
+        struct Entry { uintptr_t address; uint8_t bytes[16]; };
+        static const Entry entries[] = {
+            {0x30C576C, {0xfc, 0x6f, 0xbd, 0xa9, 0xf4, 0x4f, 0x01, 0xa9, 0xfd, 0x7b, 0x02, 0xa9, 0xfd, 0x83, 0x00, 0x91}},
+            {0x4B62364, {0x60, 0xf9, 0xff, 0x17, 0xf4, 0x4f, 0xbe, 0xa9, 0xfd, 0x7b, 0x01, 0xa9, 0xfd, 0x43, 0x00, 0x91}},
+            {0xAA4760, {0xf4, 0x4f, 0xbe, 0xa9, 0xfd, 0x7b, 0x01, 0xa9, 0xfd, 0x43, 0x00, 0x91, 0xf3, 0x03, 0x00, 0xaa}},
+            {0x42E716C, {0xfc, 0x6f, 0xbd, 0xa9, 0xf4, 0x4f, 0x01, 0xa9, 0xfd, 0x7b, 0x02, 0xa9, 0xfd, 0x83, 0x00, 0x91}},
+        };
+        for (const Entry &entry : entries) {
+            if (!YMMatchesWeChat270102Entry(entry.address, entry.bytes)) {
+                YMLog(@"270102 revoke ABI fingerprint mismatch at 0x%lx; skip", (unsigned long)entry.address);
+                return NO;
+            }
+        }
     }
 
     uintptr_t pointerAddress = YMRuntimeAddress(profile->hookPointerVA);
@@ -4895,6 +5039,16 @@ static BOOL YMPatchMultiOpenWithWeChatDylibSlide(intptr_t slide, NSString *sourc
      */
     if (!YMIsTargetWeChatVersion()) {
         YMLog(@"multi open unsupported version, skip. source=%@", source);
+        return NO;
+    }
+
+    static const uint8_t expected270102[16] = {
+        0xff, 0x03, 0x06, 0xd1, 0xfc, 0x6f, 0x14, 0xa9,
+        0xf6, 0x57, 0x15, 0xa9, 0xf4, 0x4f, 0x16, 0xa9
+    };
+    if (!YMMatchesWeChat270102Entry(YMActiveProfile->YMMultiOpenTryPreventMultiInstanceVA,
+                                    expected270102)) {
+        YMLog(@"270102 multi-open ABI fingerprint mismatch; skip");
         return NO;
     }
 
@@ -5181,6 +5335,15 @@ static BOOL YMPatchOpenURLWithSystemBrowserWithSlide(intptr_t slide, NSString *s
         return NO;
     }
 
+    static const uint8_t expected270102[16] = {
+        0xff, 0x83, 0x07, 0xd1, 0xfc, 0x6f, 0x1a, 0xa9,
+        0xf6, 0x57, 0x1b, 0xa9, 0xf4, 0x4f, 0x1c, 0xa9
+    };
+    if (!YMMatchesWeChat270102Entry(profile->openURLWebViewKindVA, expected270102)) {
+        YMLog(@"270102 open-url ABI fingerprint mismatch; skip");
+        return NO;
+    }
+
     uintptr_t address = YMRuntimeAddress(profile->openURLWebViewKindVA);
     uintptr_t hookAddress = (uintptr_t)&YMOpenURLWebViewKindHook;
 
@@ -5450,9 +5613,9 @@ YMFeatureApplyResult YMApplyFeatureSetting(NSString *key, BOOL enabled) {
     }
     const YMWeChatAdaptProfile *profile = YMGetActiveProfile();
     if ([key isEqualToString:kRevokeEnabled] || [key isEqualToString:kSelfAntiRevoke] ||
-        ([key isEqualToString:kAntiRevoke] && profile && strcmp(profile->buildVersion, "269079") == 0)) {
+        ([key isEqualToString:kAntiRevoke] && YMProfileSupportsNativeSelfRevoke(profile))) {
         // 本人适配的 Hook 启动时安装，开关只控制后续事件，不从菜单写代码页。
-        if (!profile || strcmp(profile->buildVersion, "269079") != 0) return YMFeatureUnavailable;
+        if (!YMProfileSupportsNativeSelfRevoke(profile)) return YMFeatureUnavailable;
         return enabled && !YMHasPatchedAntiRevoke ? YMFeatureNeedsRestart : YMFeatureApplied;
     }
     if ([key isEqualToString:kAntiRevoke]) {

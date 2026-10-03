@@ -23,6 +23,7 @@ NSString *YMBuildSelfRevokeNotice(uintptr_t originalWrap, uintptr_t revokeExt);
 
 namespace {
 std::atomic_bool installed(false);
+bool build270102 = false;
 std::mutex stateMutex;
 template<class T> T field(uintptr_t p, size_t offset) {
     T result;
@@ -33,6 +34,12 @@ template<class T> void put(uintptr_t p, size_t offset, T value) {
     memcpy((void *)(p + offset), &value, sizeof(value));
 }
 template<class F> F native(uintptr_t address) { return (F)YMRuntimeAddress(address); }
+uintptr_t target(uintptr_t build269079, uintptr_t build270102Address) {
+    return build270102 ? build270102Address : build269079;
+}
+size_t layout(size_t build269079, size_t build270102Offset) {
+    return build270102 ? build270102Offset : build269079;
+}
 
 struct Event {
     NSString *__strong identity;
@@ -60,7 +67,7 @@ std::shared_ptr<Event> eventAt(uintptr_t sp) {
 // Non-trivial destructor makes the native 16-byte shared_ptr return use x8.
 struct Shared {
     uintptr_t object = 0, control = 0;
-    ~Shared() { if (control) native<void (*)(void *)>(0xAE194)(this); }
+    ~Shared() { if (control) native<void (*)(void *)>(target(0xAE194, 0x127BA0))(this); }
     Shared() = default;
 #ifdef YM_SELF_REVOKE_TEST
     Shared(uintptr_t p, uintptr_t c) : object(p), control(c) {}
@@ -70,11 +77,11 @@ struct Shared {
 };
 static_assert(sizeof(Shared) == 16, "native shared_ptr ABI");
 struct Wrap {
-    alignas(8) uint8_t bytes[0x268];
-    explicit Wrap(uintptr_t source) { native<void *(*)(void *, uintptr_t)>(0xB5F950)(this, source); }
-    ~Wrap() { native<void *(*)(void *)>(0x215B27C)(this); }
+    alignas(8) uint8_t bytes[0x278];
+    explicit Wrap(uintptr_t source) { native<void *(*)(void *, uintptr_t)>(target(0xB5F950, 0xF0B548))(this, source); }
+    ~Wrap() { native<void *(*)(void *)>(target(0x215B27C, 0xAA4760))(this); }
 };
-static_assert(sizeof(Wrap) == 0x268, "lower MessageWrap, not upper MessageData");
+static_assert(sizeof(Wrap) == 0x278, "largest supported lower MessageWrap");
 struct Notice {
     std::shared_ptr<Wrap> wrap;
     std::shared_ptr<Shared> manager;
@@ -84,11 +91,11 @@ struct Notice {
 std::unordered_map<uintptr_t, std::shared_ptr<Notice>> notices;
 
 std::shared_ptr<Shared> currentManager() {
-    Shared service = native<Shared (*)()>(0x428E5D4)();
+    Shared service = native<Shared (*)()>(target(0x428E5D4, 0x451A950))();
     if (!service.object) return nullptr;
-    Shared context = native<Shared (*)(uintptr_t)>(0x13AAE84)(service.object);
+    Shared context = native<Shared (*)(uintptr_t)>(target(0x13AAE84, 0x11B809C))(service.object);
     if (!context.object) return nullptr;
-    Shared manager = native<Shared (*)(uintptr_t)>(0x2151AEC)(context.object);
+    Shared manager = native<Shared (*)(uintptr_t)>(target(0x2151AEC, 0x25B6684))(context.object);
     if (!manager.object) return nullptr;
     auto result = std::make_shared<Shared>();
     result->object = manager.object;
@@ -127,33 +134,34 @@ void rememberNotice(uintptr_t wrap, uintptr_t ext) {
 // These are the native rendered text fields. Anchor elements and re-edit payload
 // remain native-owned. Both native attach and native expiry regenerate these strings.
 void markRetainedNotice(uintptr_t ext, const std::string &body) {
-    for (size_t offset : {size_t(0x170), size_t(0x1B8)}) {
+    for (size_t offset : {layout(0x170, 0x1D0), layout(0x1B8, 0x218)}) {
         auto *text = (std::string *)(ext + offset);
         std::string replacement = body;
         // Keep only the native re-edit anchor, including its localized label/style.
         // Native link elements match the complete anchor, not a stored text offset.
         const size_t href = text->find("href=\"xwechat://reedit\"");
-        if (field<uintptr_t>(ext, 0x218) && href != std::string::npos) {
+        if (field<uintptr_t>(ext, layout(0x218, 0x278)) && href != std::string::npos) {
             const size_t start = text->rfind("<a ", href), end = text->find("</a>", href);
             if (start != std::string::npos && end != std::string::npos &&
                 text->find('>', start) > href && text->find('>', start) < end)
                 replacement += "\n" + text->substr(start, end + 4 - start);
         }
-        native<std::string &(*)(std::string *, const std::string *)>(0x63F1B78)(text, &replacement);
+        native<std::string &(*)(std::string *, const std::string *)>(target(0x63F1B78, 0x6FD07D4))(text, &replacement);
     }
 }
 
 void markNoticeBeforeInsert(uintptr_t wrap, const std::string &body) {
-    const uintptr_t rawExt = field<uintptr_t>(wrap, 0x210);
+    const uintptr_t rawExt = field<uintptr_t>(wrap, layout(0x210, 0x220));
     if (field<uint32_t>(wrap, 0x0C) != 10000 || !rawExt) throw std::runtime_error("missing revoke ext");
-    const uintptr_t ext = native<uintptr_t (*)(uintptr_t, uintptr_t, uintptr_t, int64_t)>(0x63F23F4)(
-        rawExt, YMRuntimeAddress(0x8E1B500), YMRuntimeAddress(0x8E1FE48), 0);
-    if (!ext || *(const std::string *)(ext + 0x148) != "revokemsg") throw std::runtime_error("unexpected revoke ext");
+    const uintptr_t ext = native<uintptr_t (*)(uintptr_t, uintptr_t, uintptr_t, int64_t)>(target(0x63F23F4, 0x6FD1020))(
+        rawExt, YMRuntimeAddress(target(0x8E1B500, 0x9CFC8C8)),
+        YMRuntimeAddress(target(0x8E1FE48, 0x9D017A8)), 0);
+    if (!ext || *(const std::string *)(ext + layout(0x148, 0x1A8)) != "revokemsg") throw std::runtime_error("unexpected revoke ext");
     markRetainedNotice(ext, body);
     // CoReplace itself uses this serializer: replacemsg + native revoke time, no
     // fabricated original ID. Persist the marker in the independent sysmsg XML.
-    std::string xml = native<std::string (*)(uintptr_t)>(0x48B5580)(ext);
-    native<std::string &(*)(std::string *, const std::string *)>(0x63F1B78)(
+    std::string xml = native<std::string (*)(uintptr_t)>(target(0x48B5580, 0x4BD2ADC))(ext);
+    native<std::string &(*)(std::string *, const std::string *)>(target(0x63F1B78, 0x6FD07D4))(
         (std::string *)(wrap + 0x130), &xml);
 }
 
@@ -172,7 +180,7 @@ void refreshNotice(uintptr_t ext, bool expired) noexcept {
         markRetainedNotice(ext, notice->text);
         // Existing-ext mutation signal, not the insertion/unread notification path.
         // Native subscribers receive the full wrap including its independent localId.
-        native<void (*)(uintptr_t, uint64_t, const void *)>(0x278E828)(
+        native<void (*)(uintptr_t, uint64_t, const void *)>(target(0x278E828, 0x2FB0D74))(
             notice->manager->object + 0x228, UINT64_C(0x800000000), notice->wrap.get());
     } catch (...) { YMLog(@"[SelfRevoke] native change notification failed"); }
     } @catch (NSException *) { return; }
@@ -183,7 +191,7 @@ NSString *YMSelfRevokeAccount(void) {
     @try { try {
 
     if (!installed.load()) return nil;
-    uintptr_t account = native<uintptr_t (*)()>(0x428D0BC)();
+    uintptr_t account = native<uintptr_t (*)()>(target(0x428D0BC, 0x451941C))();
     if (!account) return nil;
     auto getter = (const std::string *(*)(uintptr_t))field<uintptr_t>(field<uintptr_t>(account, 0), 0x28);
     return stringValue(getter(account));
@@ -194,14 +202,14 @@ NSString *YMSelfRevokeSession(uintptr_t wrap) {
     @try { try {
 
     if (!installed.load() || !wrap) return nil;
-    return stringValue(native<const std::string *(*)(uintptr_t)>(0x484CAF0)(wrap));
+    return stringValue(native<const std::string *(*)(uintptr_t)>(target(0x484CAF0, 0x4B62EB4))(wrap));
 
     } catch (...) { return nil; } } @catch (NSException *) { return nil; }
 }
 bool YMIsOwnRevokeWrap(uintptr_t wrap) {
     @try { try {
 
-    return installed.load() && wrap && native<bool (*)(uintptr_t)>(0x484CC14)(wrap);
+    return installed.load() && wrap && native<bool (*)(uintptr_t)>(target(0x484CC14, 0x4B62FD8))(wrap);
 
     } catch (...) { return false; } } @catch (NSException *) { return false; }
 }
@@ -214,17 +222,19 @@ bool YMPrepareSelfRevoke(uintptr_t sp, bool retain) {
         events.erase(sp);
         return true;
     }
-        const uintptr_t wrap = sp + 0x18;
+        const uintptr_t wrap = sp + layout(0x18, 0x38);
         const uint64_t identifier = field<uint64_t>(wrap, 0xF8);
         NSString *account = YMSelfRevokeAccount(), *session = YMSelfRevokeSession(wrap);
         const uint32_t localID = field<uint32_t>(wrap, 0xF4);
-        if (!identifier || !localID || !account.length || !session.length || !field<uint8_t>(sp, 0x280)) return false;
+        if (!identifier || !localID || !account.length || !session.length ||
+            !field<uint8_t>(sp, layout(0x280, 0x2B0))) return false;
         auto event = std::make_shared<Event>();
         event->identity = [YMSelfRevokeWrapIdentity(wrap) copy];
         event->account = account.UTF8String;
         if (!event->identity.length || event->account != (YMSelfRevokeAccount().UTF8String ?: "")) return false;
         event->key = event->identity.UTF8String;
-        NSMutableString *text = [YMBuildSelfRevokeNotice(wrap, field<uintptr_t>(sp, 0x2C0)) mutableCopy];
+        NSMutableString *text = [YMBuildSelfRevokeNotice(
+            wrap, field<uintptr_t>(sp, layout(0x2C0, 0x2F0))) mutableCopy];
         if (!text.length) return false;
         // Plain message/name text must not become clickable markup in the system notice.
         for (NSArray<NSString *> *pair in @[@[@"&", @"&amp;"], @[@"<", @"&lt;"], @[@">", @"&gt;"],
@@ -258,10 +268,10 @@ extern "C" void YMSelfOrigin(uintptr_t sp, uintptr_t savedRegisters) noexcept {
         YMRevokeOriginCallsiteHelper(sp, savedRegisters);
     } catch (...) {
         // Fail closed before any destructive native operation; no fake re-edit payload.
-        put<uint8_t>(sp, 0x280, 0);
+        put<uint8_t>(sp, layout(0x280, 0x2B0), 0);
         YMLog(@"[SelfRevoke] origin policy failed; original retained");
     } } @catch (NSException *) {
-        put<uint8_t>(sp, 0x280, 0);
+        put<uint8_t>(sp, layout(0x280, 0x2B0), 0);
         YMLog(@"[SelfRevoke] origin policy failed; original retained");
     }
 }
@@ -285,15 +295,16 @@ extern "C" bool YMSelfReplace(uintptr_t sp, uintptr_t fp) noexcept {
     try {
     auto event = eventAt(sp);
     if (!event) return false;
-    const uintptr_t wrap = sp + 0x5E8;
+    const uintptr_t wrap = sp + layout(0x5E8, 0x628);
     put<uint32_t>(wrap, 0xF4, 0);
     put<uint64_t>(wrap, 0xF8, 0);
     if (event->duplicate || event->account != (YMSelfRevokeAccount().UTF8String ?: "")) return true;
         markNoticeBeforeInsert(wrap, event->noticeText);
         // x0 is a shared_ptr holder (not the manager itself); caller owns it throughout.
-        const bool ok = native<bool (*)(uintptr_t, uintptr_t)>(0x2897FC0)(fp - 0xD0, wrap);
+        const bool ok = native<bool (*)(uintptr_t, uintptr_t)>(target(0x2897FC0, 0x30D0E50))(fp - 0xD0, wrap);
         const uint32_t localID = field<uint32_t>(wrap, 0xF4);
-        if (!ok || !localID || localID == field<uint32_t>(sp + 0x18, 0xF4) || field<uint64_t>(wrap, 0xF8)) {
+        if (!ok || !localID || localID == field<uint32_t>(sp + layout(0x18, 0x38), 0xF4) ||
+            field<uint64_t>(wrap, 0xF8)) {
             if (!ok && !localID) {
                 // Native false is result.localId==0; no successful inserted row was returned.
                 std::lock_guard<std::mutex> lock(stateMutex);
@@ -320,10 +331,11 @@ extern "C" bool YMSelfSuppressResult(uintptr_t sp, uintptr_t output) noexcept {
     if (!event || event->inserted) return false;
     // Native localId-zero path still constructs an engaged optional. Suppress explicitly.
     put<uint8_t>(output, 0, 0);
-    put<uint8_t>(output, 0x268, 0);
+    put<uint8_t>(output, layout(0x268, 0x278), 0);
     return true;
 
-    } catch (...) { put<uint8_t>(output, 0x268, 0); return true; } } @catch (NSException *) { put<uint8_t>(output, 0x268, 0); return true; }
+    } catch (...) { put<uint8_t>(output, layout(0x268, 0x278), 0); return true; }
+    } @catch (NSException *) { put<uint8_t>(output, layout(0x268, 0x278), 0); return true; }
 }
 extern "C" void YMSelfEnd(uintptr_t sp) noexcept {
     @try { try {
@@ -346,10 +358,11 @@ extern "C" uint64_t YMSelfRecordID(uintptr_t wrap) noexcept {
         if (nativeID || field<uint32_t>(wrap, 0x0C) != 10000 || !YMIsSelfRevokeNotice(wrap)) return nativeID;
         // Check the exact native ext type without rechecking time between query and expiry.
         // The enclosing native enrichment already owns the time/type eligibility decision.
-        const uintptr_t rawExt = field<uintptr_t>(wrap, 0x210);
+        const uintptr_t rawExt = field<uintptr_t>(wrap, layout(0x210, 0x220));
         if (!rawExt) return nativeID;
-        const uintptr_t ext = native<uintptr_t (*)(uintptr_t, uintptr_t, uintptr_t, int64_t)>(0x63F23F4)(
-            rawExt, YMRuntimeAddress(0x8E1B500), YMRuntimeAddress(0x8E1FE48), 0);
+        const uintptr_t ext = native<uintptr_t (*)(uintptr_t, uintptr_t, uintptr_t, int64_t)>(target(0x63F23F4, 0x6FD1020))(
+            rawExt, YMRuntimeAddress(target(0x8E1B500, 0x9CFC8C8)),
+            YMRuntimeAddress(target(0x8E1FE48, 0x9D017A8)), 0);
         if (!ext) return nativeID;
         // Native sysmsg serialization omits ext.originalID; join through our persisted
         // account/session/localId ledger, not the receive-event-only ext+0x168 field.
@@ -362,7 +375,7 @@ extern "C" uint64_t YMSelfRecordID(uintptr_t wrap) noexcept {
 
 extern "C" uintptr_t YMSelfSessionPointer(uintptr_t wrap) noexcept {
     @try { try {
-        return native<uintptr_t (*)(uintptr_t)>(0x484CAF0)(wrap);
+        return native<uintptr_t (*)(uintptr_t)>(target(0x484CAF0, 0x4B62EB4))(wrap);
     } catch (...) { return 0; } } @catch (NSException *) { return 0; }
 }
 
@@ -372,7 +385,7 @@ extern "C" uint64_t YMSelfExpiryRecordID(uintptr_t wrap) noexcept {
     try {
         if (identifier && field<uint64_t>(wrap, 0xF8) == 0 && YMIsSelfRevokeNotice(wrap)) {
             // This callsite is reached only after a native record was successfully attached.
-            const uintptr_t ext = field<uintptr_t>(wrap, 0x210);
+            const uintptr_t ext = field<uintptr_t>(wrap, layout(0x210, 0x220));
             rememberNotice(wrap, ext);
             refreshNotice(ext, false);
         }
@@ -389,6 +402,16 @@ extern "C" void YMSelfExpire(uintptr_t ext) {
 // Each mid-function helper preserves every GPR, SIMD register and NZCV.
 // Continuations replay all four displaced instructions, including relative calls.
 #if defined(__aarch64__) && (!defined(YM_SELF_REVOKE_TEST) || defined(YM_SELF_REVOKE_ASSEMBLY_TEST))
+extern "C" uintptr_t YMSelfOriginResultStackOffset;
+uintptr_t YMSelfOriginResultStackOffset = 0x2D8;
+extern "C" uintptr_t YMSelfOriginalWrapStackOffset;
+uintptr_t YMSelfOriginalWrapStackOffset = 0x18;
+extern "C" uintptr_t YMSelfManagerStackOffset;
+uintptr_t YMSelfManagerStackOffset = 0x2D0;
+extern "C" uintptr_t YMSelfNoticeWrapStackOffset;
+uintptr_t YMSelfNoticeWrapStackOffset = 0x5E8;
+extern "C" uintptr_t YMSelfQueryVectorStackOffset;
+uintptr_t YMSelfQueryVectorStackOffset = 0x310;
 extern "C" uintptr_t YMSelfOriginAfter;
 uintptr_t YMSelfOriginAfter = 0;
 extern "C" uintptr_t YMSelfOriginZero;
@@ -512,7 +535,9 @@ __asm__(
     "mov x1, sp\n"
     "bl _YMSelfOrigin\n"
     "YMSelfRestore\n"
-    "ldr x22, [sp, #0x2D8]\n"
+    "adrp x16, _YMSelfOriginResultStackOffset@PAGE\n"
+    "ldr x16, [x16, _YMSelfOriginResultStackOffset@PAGEOFF]\n"
+    "ldr x22, [sp, x16]\n"
     "cbz x22, 1f\n"
     "add x8, x22, #8\n"
     "mov x9, #-1\n"
@@ -540,8 +565,12 @@ __asm__(
     "br x16\n"
     "1:\n"
     "YMSelfRestore\n"
-    "ldr x0, [sp, #0x2D0]\n"
-    "add x1, sp, #0x18\n"
+    "adrp x16, _YMSelfManagerStackOffset@PAGE\n"
+    "ldr x16, [x16, _YMSelfManagerStackOffset@PAGEOFF]\n"
+    "ldr x0, [sp, x16]\n"
+    "adrp x16, _YMSelfOriginalWrapStackOffset@PAGE\n"
+    "ldr x16, [x16, _YMSelfOriginalWrapStackOffset@PAGEOFF]\n"
+    "add x1, sp, x16\n"
     "mov w2, #0\n"
     "adrp x16, _YMSelfDeleteAfter@PAGE\n"
     "ldr x16, [x16, _YMSelfDeleteAfter@PAGEOFF]\n"
@@ -568,8 +597,12 @@ __asm__(
     "1:\n"
     "YMSelfRestore\n"
     "ldur x0, [x29, #-0xD0]\n"
-    "add x8, sp, #0x2D0\n"
-    "add x1, sp, #0x5E8\n"
+    "adrp x16, _YMSelfManagerStackOffset@PAGE\n"
+    "ldr x16, [x16, _YMSelfManagerStackOffset@PAGEOFF]\n"
+    "add x8, sp, x16\n"
+    "adrp x16, _YMSelfNoticeWrapStackOffset@PAGE\n"
+    "ldr x16, [x16, _YMSelfNoticeWrapStackOffset@PAGEOFF]\n"
+    "add x1, sp, x16\n"
     "adrp x16, _YMSelfReplaceAfter@PAGE\n"
     "ldr x16, [x16, _YMSelfReplaceAfter@PAGEOFF]\n"
     "mov x30, x16\n"
@@ -594,7 +627,9 @@ __asm__(
     "br x16\n"
     "1:\n"
     "YMSelfRestore\n"
-    "add x1, sp, #0x5E8\n"
+    "adrp x16, _YMSelfNoticeWrapStackOffset@PAGE\n"
+    "ldr x16, [x16, _YMSelfNoticeWrapStackOffset@PAGEOFF]\n"
+    "add x1, sp, x16\n"
     "mov x0, x19\n"
     "adrp x16, _YMSelfResultAfter@PAGE\n"
     "ldr x16, [x16, _YMSelfResultAfter@PAGEOFF]\n"
@@ -633,8 +668,11 @@ __asm__(
     "bl _YMSelfRecordID\n"
     "str x0, [sp, #152]\n"
     "YMSelfRestore\n"
-    "ldr x28, [sp, #0x310]\n"
-    "ldr x8, [sp, #0x318]\n"
+    "adrp x16, _YMSelfQueryVectorStackOffset@PAGE\n"
+    "ldr x16, [x16, _YMSelfQueryVectorStackOffset@PAGEOFF]\n"
+    "ldr x28, [sp, x16]\n"
+    "add x16, x16, #8\n"
+    "ldr x8, [sp, x16]\n"
     "cmp x28, x8\n"
     "adrp x16, _YMSelfQueryAfter@PAGE\n"
     "ldr x16, [x16, _YMSelfQueryAfter@PAGEOFF]\n"
@@ -706,9 +744,9 @@ __asm__(
 
 namespace {
 struct Fingerprint { uintptr_t address; uint8_t bytes[16]; };
-// Exact Build269079 instructions, including native callees and continuation paths.
+// Exact instructions, including native callees and continuation paths.
 // Result copying has native inbound branches at +0x2BBC920; keep that as the patch entry.
-const Fingerprint fingerprints[] = {
+const Fingerprint fingerprints269079[] = {
     {0x2BBBE44, {0xe0, 0x6b, 0x41, 0xf9, 0xe1, 0x63, 0x00, 0x91, 0x02, 0x00, 0x80, 0x52, 0xf0, 0x7d, 0xf2, 0x97}},
     {0x2BBBF04, {0xa0, 0x03, 0x53, 0xf8, 0xe8, 0x43, 0x0b, 0x91, 0xe1, 0xa3, 0x17, 0x91, 0xd0, 0x44, 0xf3, 0x97}},
     {0x2BBC920, {0xe1, 0xa3, 0x17, 0x91, 0xe0, 0x03, 0x13, 0xaa, 0x5c, 0x01, 0xd7, 0x97, 0x28, 0x00, 0x80, 0x52}},
@@ -737,9 +775,40 @@ const Fingerprint fingerprints[] = {
     {0x2BBF6EC, {0xe0, 0x03, 0x0b, 0x91, 0xe1, 0xc3, 0x00, 0x91, 0xe2, 0xc3, 0x00, 0x91, 0xe3, 0x03, 0x14, 0xaa}},
     {0x2BBC934, {0xe0, 0xa3, 0x17, 0x91, 0x51, 0x7a, 0xd6, 0x97, 0xe8, 0x03, 0x4a, 0x39, 0x1f, 0x05, 0x00, 0x71}},
     {0x63F23F4, {0xf0, 0x36, 0x01, 0x90, 0x10, 0xb2, 0x45, 0xf9, 0x00, 0x02, 0x1f, 0xd6, 0xf0, 0x36, 0x01, 0x90}},
-    {0x63F1AC4, {0xf0, 0x36, 0x01, 0xb0, 0x10, 0xc2, 0x41, 0xf9, 0x00, 0x02, 0x1f, 0xd6, 0xf0, 0x36, 0x01, 0xb0}},
     {0x63F1B78, {0xf0, 0x36, 0x01, 0xb0, 0x10, 0xfe, 0x41, 0xf9, 0x00, 0x02, 0x1f, 0xd6, 0xf0, 0x36, 0x01, 0xb0}},
     {0x48B5580, {0xfc, 0x6f, 0xbb, 0xa9, 0xf8, 0x5f, 0x01, 0xa9, 0xf6, 0x57, 0x02, 0xa9, 0xf4, 0x4f, 0x03, 0xa9}},
+};
+const Fingerprint fingerprints270102[] = {
+    {0x3419BB8, {0xe0, 0x83, 0x41, 0xf9, 0xe1, 0xe3, 0x00, 0x91, 0x02, 0x00, 0x80, 0x52, 0x11, 0xea, 0xf1, 0x97}},
+    {0x3419C78, {0xa0, 0x03, 0x53, 0xf8, 0xe8, 0x03, 0x0c, 0x91, 0xe1, 0xa3, 0x18, 0x91, 0x63, 0xb1, 0xf2, 0x97}},
+    {0x3419E5C, {0xe1, 0xa3, 0x18, 0x91, 0xe0, 0x03, 0x13, 0xaa, 0x11, 0xd6, 0xd3, 0x97, 0x28, 0x00, 0x80, 0x52}},
+    {0x3417E44, {0xa8, 0x83, 0x5b, 0xf8, 0x89, 0x2b, 0x03, 0xf0, 0x29, 0x45, 0x46, 0xf9, 0x29, 0x01, 0x40, 0xf9}},
+    {0x341CC90, {0x93, 0x7e, 0x40, 0xf9, 0xfc, 0x93, 0x41, 0xf9, 0xe8, 0x97, 0x41, 0xf9, 0x9f, 0x03, 0x08, 0xeb}},
+    {0x341CE34, {0xe0, 0x03, 0x14, 0xaa, 0x1f, 0x18, 0x5d, 0x94, 0x81, 0x7e, 0x40, 0xf9, 0xe8, 0xc3, 0x00, 0x91}},
+    {0x341D4A4, {0xe2, 0x97, 0x40, 0xf9, 0xa8, 0x63, 0x72, 0xa9, 0xe8, 0x63, 0x01, 0xa9, 0x78, 0x00, 0x00, 0xb4}},
+    {0x4BD29B0, {0xfc, 0x6f, 0xbd, 0xa9, 0xf4, 0x4f, 0x01, 0xa9, 0xfd, 0x7b, 0x02, 0xa9, 0xfd, 0x83, 0x00, 0x91}},
+    {0x3418394, {0xf6, 0x87, 0x41, 0xf9, 0x76, 0x01, 0x00, 0xb4, 0xc8, 0x22, 0x00, 0x91, 0x09, 0x00, 0x80, 0x92}},
+    {0x30D0E50, {0xf8, 0x5f, 0xbc, 0xa9, 0xf6, 0x57, 0x01, 0xa9, 0xf4, 0x4f, 0x02, 0xa9, 0xfd, 0x7b, 0x03, 0xa9}},
+    {0xF0B548, {0xf8, 0x5f, 0xbc, 0xa9, 0xf6, 0x57, 0x01, 0xa9, 0xf4, 0x4f, 0x02, 0xa9, 0xfd, 0x7b, 0x03, 0xa9}},
+    {0xAA4760, {0xf4, 0x4f, 0xbe, 0xa9, 0xfd, 0x7b, 0x01, 0xa9, 0xfd, 0x43, 0x00, 0x91, 0xf3, 0x03, 0x00, 0xaa}},
+    {0x127BA0, {0xf4, 0x4f, 0xbe, 0xa9, 0xfd, 0x7b, 0x01, 0xa9, 0xfd, 0x43, 0x00, 0x91, 0x13, 0x04, 0x40, 0xf9}},
+    {0x451A950, {0xff, 0xc3, 0x00, 0xd1, 0xf4, 0x4f, 0x01, 0xa9, 0xfd, 0x7b, 0x02, 0xa9, 0xfd, 0x83, 0x00, 0x91}},
+    {0x11B809C, {0x0a, 0xa4, 0x42, 0xa9, 0x0a, 0x25, 0x00, 0xa9, 0x89, 0x00, 0x00, 0xb4, 0x28, 0x21, 0x00, 0x91}},
+    {0x25B6684, {0xff, 0xc3, 0x01, 0xd1, 0xf4, 0x4f, 0x05, 0xa9, 0xfd, 0x7b, 0x06, 0xa9, 0xfd, 0x83, 0x01, 0x91}},
+    {0x2FB0D74, {0xfc, 0x6f, 0xba, 0xa9, 0xfa, 0x67, 0x01, 0xa9, 0xf8, 0x5f, 0x02, 0xa9, 0xf6, 0x57, 0x03, 0xa9}},
+    {0x451941C, {0x08, 0xec, 0x02, 0xd0, 0x00, 0xc5, 0x44, 0xf9, 0xc0, 0x03, 0x5f, 0xd6, 0xff, 0xc3, 0x00, 0xd1}},
+    {0x4B62EB4, {0xf4, 0x4f, 0xbe, 0xa9, 0xfd, 0x7b, 0x01, 0xa9, 0xfd, 0x43, 0x00, 0x91, 0xf3, 0x03, 0x00, 0xaa}},
+    {0x4B62FD8, {0x08, 0x0c, 0x40, 0xb9, 0x09, 0xe2, 0x84, 0x52, 0x1f, 0x01, 0x09, 0x6b, 0x60, 0x05, 0x00, 0x54}},
+    {0x48DC10C, {0xff, 0xc3, 0x00, 0xd1, 0xf4, 0x4f, 0x01, 0xa9, 0xfd, 0x7b, 0x02, 0xa9, 0xfd, 0x83, 0x00, 0x91}},
+    {0x341D7E8, {0xff, 0x83, 0x05, 0xd1, 0xfc, 0x6f, 0x12, 0xa9, 0xf6, 0x57, 0x13, 0xa9, 0xf4, 0x4f, 0x14, 0xa9}},
+    {0x3094408, {0xf8, 0x5f, 0xbc, 0xa9, 0xf6, 0x57, 0x01, 0xa9, 0xf4, 0x4f, 0x02, 0xa9, 0xfd, 0x7b, 0x03, 0xa9}},
+    {0x30C6210, {0xff, 0x43, 0x01, 0xd1, 0xf6, 0x57, 0x02, 0xa9, 0xf4, 0x4f, 0x03, 0xa9, 0xfd, 0x7b, 0x04, 0xa9}},
+    {0x3419C88, {0xe0, 0xa3, 0x18, 0x91, 0xe1, 0x03, 0x0c, 0x91, 0x9c, 0xdd, 0xd3, 0x97, 0xe0, 0x03, 0x0c, 0x91}},
+    {0x341CE48, {0xe0, 0x43, 0x0b, 0x91, 0xe1, 0xc3, 0x00, 0x91, 0xe2, 0xc3, 0x00, 0x91, 0xe3, 0x03, 0x14, 0xaa}},
+    {0x3419E70, {0xe0, 0xa3, 0x18, 0x91, 0x3b, 0x2a, 0x5a, 0x97, 0xe8, 0xc3, 0x4a, 0x39, 0x1f, 0x05, 0x00, 0x71}},
+    {0x6FD1020, {0xd0, 0x4d, 0x01, 0xb0, 0x10, 0x12, 0x46, 0xf9, 0x00, 0x02, 0x1f, 0xd6, 0xd0, 0x4d, 0x01, 0xb0}},
+    {0x6FD07D4, {0xd0, 0x4d, 0x01, 0xd0, 0x10, 0x7a, 0x42, 0xf9, 0x00, 0x02, 0x1f, 0xd6, 0xd0, 0x4d, 0x01, 0xd0}},
+    {0x4BD2ADC, {0xfc, 0x6f, 0xbb, 0xa9, 0xf8, 0x5f, 0x01, 0xa9, 0xf6, 0x57, 0x02, 0xa9, 0xf4, 0x4f, 0x03, 0xa9}},
 };
 bool readMemory(uintptr_t address, void *out, size_t count) {
     mach_vm_size_t copied = 0;
@@ -750,7 +819,9 @@ bool matchingImage(uintptr_t base) {
     mach_header_64 header{};
     if (!readMemory(base, &header, sizeof(header)) || header.magic != MH_MAGIC_64 ||
         header.cputype != CPU_TYPE_ARM64 || header.sizeofcmds > 1024 * 1024) return false;
-    const uint8_t expected[16] = {0x58,0x02,0x94,0xa4,0x5a,0xf5,0x31,0x0d,0x9a,0x9a,0xc3,0x63,0x9b,0xee,0x0a,0x28};
+    const uint8_t expected269079[16] = {0x58,0x02,0x94,0xa4,0x5a,0xf5,0x31,0x0d,0x9a,0x9a,0xc3,0x63,0x9b,0xee,0x0a,0x28};
+    const uint8_t expected270102[16] = {0x3b,0x7b,0x6a,0xbb,0x2c,0x36,0x3e,0x58,0xa3,0x84,0xcd,0xef,0x05,0xa5,0x7a,0xa5};
+    const uint8_t *expected = build270102 ? expected270102 : expected269079;
     size_t offset = sizeof(header), end = offset + header.sizeofcmds;
     bool uuidMatches = false;
     for (uint32_t i = 0; i < header.ncmds; ++i) {
@@ -760,7 +831,7 @@ bool matchingImage(uintptr_t base) {
         if (command.cmd == LC_UUID) {
             uuid_command uuid{};
             if (command.cmdsize < sizeof(uuid) || !readMemory(base + offset, &uuid, sizeof(uuid))) return false;
-            uuidMatches = memcmp(uuid.uuid, expected, sizeof(expected)) == 0;
+            uuidMatches = memcmp(uuid.uuid, expected, 16) == 0;
         }
         offset += command.cmdsize;
     }
@@ -774,7 +845,8 @@ bool writeCode(uintptr_t address, const void *bytes) {
     sys_icache_invalidate((void *)address, 16);
     return mach_vm_protect(mach_task_self(), page, length, false, VM_PROT_READ | VM_PROT_EXECUTE) == KERN_SUCCESS;
 }
-bool applyPatches(uintptr_t base, const uintptr_t *hooks, size_t count,
+bool applyPatches(uintptr_t base, const Fingerprint *fingerprints,
+                  const uintptr_t *hooks, size_t count,
                   bool (*writer)(uintptr_t, const void *) = writeCode) {
     // Keep the native result-move return instruction and its unwind callsite intact.
     const int64_t resultPages = (int64_t)(hooks[2] >> 12) -
@@ -812,9 +884,17 @@ bool YMInstallSelfRevokePatch(void) {
     static std::mutex installMutex;
     std::lock_guard<std::mutex> lock(installMutex);
     if (installed.load()) return true;
+    NSString *build = [NSBundle.mainBundle objectForInfoDictionaryKey:@"CFBundleVersion"];
+    if (![build isEqualToString:@"269079"] && ![build isEqualToString:@"270102"]) return false;
+    build270102 = [build isEqualToString:@"270102"];
     const uintptr_t base = getDylibSlide();
     if (!base || !matchingImage(base)) return false;
-    for (const auto &fingerprint : fingerprints) {
+    const Fingerprint *fingerprints = build270102 ? fingerprints270102 : fingerprints269079;
+    const size_t fingerprintCount = build270102
+        ? sizeof(fingerprints270102) / sizeof(*fingerprints270102)
+        : sizeof(fingerprints269079) / sizeof(*fingerprints269079);
+    for (size_t i = 0; i < fingerprintCount; ++i) {
+        const Fingerprint &fingerprint = fingerprints[i];
         uint8_t actual[16];
         if (!readMemory(base + fingerprint.address, actual, sizeof(actual)) ||
             memcmp(actual, fingerprint.bytes, sizeof(actual))) {
@@ -822,24 +902,29 @@ bool YMInstallSelfRevokePatch(void) {
             return false;
         }
     }
-    YMSelfOriginAfter = base + 0x2BBB1B8;
-    YMSelfOriginZero = base + 0x2BBB1D8;
-    YMSelfDeleteAfter = base + 0x2BBBE54;
-    YMSelfDeleteNative = base + 0x285B610;
-    YMSelfReplaceDone = base + 0x2BBBF28;
-    YMSelfReplaceAfter = base + 0x2BBBF14;
-    YMSelfReplaceNative = base + 0x288D250;
-    YMSelfResultEmpty = base + 0x2BBC934;
-    YMSelfResultAfter = base + 0x2BBC92C;
-    YMSelfResultCopyNative = base + 0x217CE98;
-    YMSelfCanaryPointer = base + 0x8ACEBC8;
-    YMSelfEndAfter = base + 0x2BBAC68;
-    YMSelfQueryAfter = base + 0x2BBF544;
-    YMSelfKeySkip = base + 0x2BBF51C;
-    YMSelfKeyAfter = base + 0x2BBF6E8;
-    YMSelfExpiryIDAfter = base + 0x2BBFD58;
-    YMSelfExpiryIDNull = base + 0x2BBFD60;
-    YMSelfExpireAfter = base + 0x48B5464;
+    YMSelfOriginResultStackOffset = layout(0x2D8, 0x308);
+    YMSelfOriginalWrapStackOffset = layout(0x18, 0x38);
+    YMSelfManagerStackOffset = layout(0x2D0, 0x300);
+    YMSelfNoticeWrapStackOffset = layout(0x5E8, 0x628);
+    YMSelfQueryVectorStackOffset = layout(0x310, 0x320);
+    YMSelfOriginAfter = base + target(0x2BBB1B8, 0x34183A4);
+    YMSelfOriginZero = base + target(0x2BBB1D8, 0x34183C4);
+    YMSelfDeleteAfter = base + target(0x2BBBE54, 0x3419BC8);
+    YMSelfDeleteNative = base + target(0x285B610, 0x3094408);
+    YMSelfReplaceDone = base + target(0x2BBBF28, 0x3419C9C);
+    YMSelfReplaceAfter = base + target(0x2BBBF14, 0x3419C88);
+    YMSelfReplaceNative = base + target(0x288D250, 0x30C6210);
+    YMSelfResultEmpty = base + target(0x2BBC934, 0x3419E70);
+    YMSelfResultAfter = base + target(0x2BBC92C, 0x3419E68);
+    YMSelfResultCopyNative = base + target(0x217CE98, 0x290F6A8);
+    YMSelfCanaryPointer = base + target(0x8ACEBC8, 0x998AC88);
+    YMSelfEndAfter = base + target(0x2BBAC68, 0x3417E54);
+    YMSelfQueryAfter = base + target(0x2BBF544, 0x341CCA0);
+    YMSelfKeySkip = base + target(0x2BBF51C, 0x341CC78);
+    YMSelfKeyAfter = base + target(0x2BBF6E8, 0x341CE44);
+    YMSelfExpiryIDAfter = base + target(0x2BBFD58, 0x341D4B4);
+    YMSelfExpiryIDNull = base + target(0x2BBFD60, 0x341D4BC);
+    YMSelfExpireAfter = base + target(0x48B5464, 0x4BD29C0);
     const uintptr_t hooks[] = {
         (uintptr_t)&YMSelfDeleteStub,
         (uintptr_t)&YMSelfReplaceStub,
@@ -853,7 +938,7 @@ bool YMInstallSelfRevokePatch(void) {
     };
     // Called from the dyld image-load installation boundary before revoke handling.
     // Validate every site first, then rollback *including* a failed write (RX restore can fail).
-    if (!applyPatches(base, hooks, sizeof(hooks) / sizeof(*hooks))) return false;
+    if (!applyPatches(base, fingerprints, hooks, sizeof(hooks) / sizeof(*hooks))) return false;
     installed.store(true);
     return true;
 #else

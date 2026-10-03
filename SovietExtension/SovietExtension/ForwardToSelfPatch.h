@@ -9,7 +9,7 @@
 //    Build 268853 文字通知使用 SendMsg CGI，profile.sendMsgCGIVA 管理；不支持原媒体转发。
 //      Build 268853: sub_8da920 (VA 0x8da920)；Build 269079 历史入口: sub_8e8e64 (VA 0x8e8e64)。
 //      269079 历史地址仅供逆向适配参考，当前使用下述原生入口。
-//    Build 269079 原生消息入口由 profile.mediaForward 管理：
+//    Build 269079/270102 原生消息入口由 profile.mediaForward 管理，地址按 Build 分离校验：
 //      0x484f234：MessageWrap → MessageData；0x2e1ff8：MessageData 析构。
 //      0x1453e34：单条消息转发并订阅任务；0x13b1bb0：插入本人接收方。
 //    通知构造器单独校验：0x48e0f90 默认构造 MessageData，再复用上述转发入口。
@@ -45,7 +45,7 @@ typedef struct {
 /// 仅在版本、UUID 和四个函数入口指纹均匹配时返回可用地址，否则清空输出。
 BOOL YMGetMediaForwardAddresses(YMMediaForwardAddresses *addresses);
 
-/// Build 269079 的 MessageData 默认构造器；原生链、UUID 和入口指纹均匹配才可用。
+/// Build 269079/270102 的 MessageData 默认构造器；原生链、UUID 和入口指纹均匹配才可用。
 uintptr_t YMMessageDataConstructorRuntimeAddress(void);
 
 /// 通过 roomID 查群名，查不到返回 @""

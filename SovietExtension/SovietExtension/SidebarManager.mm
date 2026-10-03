@@ -53,8 +53,26 @@ static NSString *const YMNavigationSidebarSecondaryOrderKey = @"secondaryOrder";
 static NSString *const YMNavigationSidebarExposeSecondaryKey =
     @"exposeSecondaryEntries";
 
+static const YMSidebarPatchTargetProfile &YMNavigationSidebarTargetProfile =
+    []() -> const YMSidebarPatchTargetProfile & {
+        NSBundle *bundle = NSBundle.mainBundle;
+        NSString *bundleIdentifier = bundle.bundleIdentifier ?: @"";
+        NSString *shortVersion =
+            [bundle objectForInfoDictionaryKey:@"CFBundleShortVersionString"]
+                ?: @"";
+        NSString *buildVersion =
+            [bundle objectForInfoDictionaryKey:@"CFBundleVersion"] ?: @"";
+        if (YMNavigationSidebarProfileMatches(
+                YMNavigationSidebarWeChat415BuildProfile,
+                bundleIdentifier.UTF8String,
+                shortVersion.UTF8String,
+                buildVersion.UTF8String)) {
+            return YMSidebarPatchWeChat415TargetProfile;
+        }
+        return YMSidebarPatchWeChat411TargetProfile;
+    }();
 static const YMNavigationSidebarBuildProfile &YMNavigationSidebarProfile =
-    YMNavigationSidebarWeChat411BuildProfile;
+    *YMNavigationSidebarTargetProfile.sidebarProfile;
 
 using YMNavigationSidebarOwnerFunction = void (*)(void *);
 using YMNavigationSidebarMainWindowDestructor = void *(*)(void *);
@@ -179,7 +197,7 @@ static bool YMNavigationSidebarReadComponentCandidate(
     std::uint64_t offset,
     std::uint64_t &candidateIdentity) {
     void *candidate = nullptr;
-    if (offset != component_bridge::kComponentSurfaceOffset ||
+    if (offset != YMNavigationSidebarTargetProfile.componentSurfaceOffset ||
         !YMNavigationSidebarLoadPointerMember(
             reinterpret_cast<void *>(ownerIdentity), offset, candidate)) {
         return false;
@@ -467,6 +485,7 @@ static runtime::Orders YMNavigationSidebarCaptureOwner(void *owner) {
         static_cast<void>(componentOwnerBridge.captureOwner(
             reinterpret_cast<std::uint64_t>(owner),
             0,
+            YMNavigationSidebarTargetProfile.componentSurfaceOffset,
             componentOwnerBridge.currentToken()));
         void *previous =
             YMNavigationSidebarOwner.exchange(owner, std::memory_order_acq_rel);
@@ -952,7 +971,7 @@ YMNavigationSidebarPreparePrimaryVisibility(
     plan.owner = owner;
     if (!YMNavigationSidebarLoadPointerMember(
             owner,
-            kYMNavigationSidebarPrimaryControllerOffset,
+            YMNavigationSidebarTargetProfile.primaryControllerOffset,
             plan.controller)) {
         return YMNavigationSidebarPrimaryPrepareFailure::unavailable;
     }
@@ -1052,7 +1071,9 @@ static void YMNavigationSidebarApplyDiscoverEntryVisibility(
 
     void *controller = nullptr;
     if (!YMNavigationSidebarLoadPointerMember(
-            owner, kYMNavigationSidebarPrimaryControllerOffset, controller) ||
+            owner,
+            YMNavigationSidebarTargetProfile.primaryControllerOffset,
+            controller) ||
         controller == nullptr) {
         return;
     }
@@ -1201,7 +1222,7 @@ static bool YMNavigationSidebarApplySecondaryProjection(
     void *controller = nullptr;
     if (!YMNavigationSidebarLoadPointerMember(
             owner,
-            kYMNavigationSidebarSecondaryControllerOffset,
+            YMNavigationSidebarTargetProfile.secondaryControllerOffset,
             controller)) {
         return false;
     }
@@ -1247,11 +1268,11 @@ static bool YMNavigationSidebarApplySecondaryProjection(
     const std::uintptr_t ownerAddress =
         reinterpret_cast<std::uintptr_t>(owner);
     if (ownerAddress > std::numeric_limits<std::uintptr_t>::max() -
-                           kYMNavigationSidebarOverflowOffset) {
+                           YMNavigationSidebarTargetProfile.overflowOffset) {
         return false;
     }
     callbacks.overflowHolder = reinterpret_cast<void *>(
-        ownerAddress + kYMNavigationSidebarOverflowOffset);
+        ownerAddress + YMNavigationSidebarTargetProfile.overflowOffset);
     if (!YMNavigationSidebarRangeHasProtection(
             reinterpret_cast<std::uintptr_t>(callbacks.overflowHolder),
             adapter::kHolderSlotsOffset,
@@ -1339,7 +1360,8 @@ struct YMNavigationSidebarLayoutScope {
                 const int type =
                     kYMNavigationSidebarSecondarySortableTypes[index];
                 auto *flag = static_cast<std::uint8_t *>(owner) +
-                             YMNavigationSidebarAvailabilityFlagOffset(type);
+                             YMSidebarPatchAvailabilityFlagOffset(
+                                 YMNavigationSidebarTargetProfile, type);
                 *flag = saved[index];
             }
         }
@@ -1369,7 +1391,8 @@ static void YMNavigationSidebarRearmSecondaryAvailability(void *owner) noexcept 
     const std::uintptr_t base = reinterpret_cast<std::uintptr_t>(owner);
     for (const int type : kYMNavigationSidebarSecondarySortableTypes) {
         const std::uintptr_t offset =
-            YMNavigationSidebarAvailabilityFlagOffset(type);
+            YMSidebarPatchAvailabilityFlagOffset(
+                YMNavigationSidebarTargetProfile, type);
         if (offset == 0 ||
             base > std::numeric_limits<std::uintptr_t>::max() - offset) {
             continue;
@@ -1437,7 +1460,8 @@ static bool YMNavigationSidebarRunResponsiveLayout(void *owner) {
          ++index) {
         const int type = kYMNavigationSidebarSecondarySortableTypes[index];
         const std::uintptr_t offset =
-            YMNavigationSidebarAvailabilityFlagOffset(type);
+            YMSidebarPatchAvailabilityFlagOffset(
+                YMNavigationSidebarTargetProfile, type);
         const std::uintptr_t address =
             reinterpret_cast<std::uintptr_t>(owner) + offset;
         if (offset == 0 ||
@@ -1510,11 +1534,11 @@ static bool YMNavigationSidebarForceExpandedLayout(void *owner) noexcept {
     }
     const std::uintptr_t base = reinterpret_cast<std::uintptr_t>(owner);
     if (base > std::numeric_limits<std::uintptr_t>::max() -
-                   kYMNavigationSidebarLayoutModeOffset) {
+                   YMNavigationSidebarTargetProfile.layoutModeOffset) {
         return false;
     }
     const std::uintptr_t modeAddress =
-        base + kYMNavigationSidebarLayoutModeOffset;
+        base + YMNavigationSidebarTargetProfile.layoutModeOffset;
     if (!YMNavigationSidebarRangeHasProtection(
             modeAddress, sizeof(std::uint8_t),
             VM_PROT_READ | VM_PROT_WRITE)) {
@@ -1535,7 +1559,8 @@ static bool YMNavigationSidebarForceExpandedLayout(void *owner) noexcept {
     for (std::size_t index = 0; index < kSecondaryCount; ++index) {
         const int type = kYMNavigationSidebarSecondarySortableTypes[index];
         const std::uintptr_t offset =
-            YMNavigationSidebarAvailabilityFlagOffset(type);
+            YMSidebarPatchAvailabilityFlagOffset(
+                YMNavigationSidebarTargetProfile, type);
         if (offset == 0 ||
             base > std::numeric_limits<std::uintptr_t>::max() - offset) {
             return false;
@@ -1695,11 +1720,13 @@ static void *YMNavigationSidebarDidDestroyMainWindow(void *mainWindow) {
     void *destroyedOwner = nullptr;
     if (mainWindow != nullptr &&
         YMNavigationSidebarRangeHasProtection(
-            reinterpret_cast<std::uintptr_t>(mainWindow) + 0x2A0,
+            reinterpret_cast<std::uintptr_t>(mainWindow) +
+                YMNavigationSidebarTargetProfile.mainWindowOwnerOffset,
             sizeof(destroyedOwner),
             VM_PROT_READ)) {
         std::memcpy(&destroyedOwner,
-                    static_cast<std::uint8_t *>(mainWindow) + 0x2A0,
+                    static_cast<std::uint8_t *>(mainWindow) +
+                        YMNavigationSidebarTargetProfile.mainWindowOwnerOffset,
                     sizeof(destroyedOwner));
     }
 
@@ -3027,7 +3054,7 @@ static BOOL YMNavigationSidebarPerformSave(
             YMNavigationSidebarGetSelectedPrimary == nullptr ||
             !YMNavigationSidebarLoadPointerMember(
                 owner,
-                kYMNavigationSidebarPrimaryControllerOffset,
+                YMNavigationSidebarTargetProfile.primaryControllerOffset,
                 callbacks.controller)) {
             if (error != nullptr) {
                 *error = YMNavigationSidebarError(

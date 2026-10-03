@@ -3,11 +3,11 @@
 //  SovietExtension
 //
 //  ============================================================
-//  Build 269079 菜单 +1 与撤回同步共用原生转发链
+//  Build 269079/270102 菜单 +1 与撤回同步共用各自的原生转发链
 //  Build 268853 撤回同步保留 CGI 文字通知。
 //  ============================================================
 //
-//  ★ 269079 的三种输入最终都交给 YMSubmitMessageToSession：
+//  ★ 269079/270102 的三种输入最终都交给 YMSubmitMessageToSession：
 //    +1：持有菜单原生 MessageData 快照，原样发回快照记录的会话，不是发给自己。
 //    撤回媒体：在回调返回前将 MessageWrap 转成独立 MessageData，目标为显式本人账号。
 //    撤回通知：将“撤回人、内容、时间”构造成新的文字 MessageData，同样发给本人。
@@ -314,8 +314,12 @@ static BOOL YMForwardViaSendMsgCGI(uintptr_t fn, NSString *selfId, NSString *con
 
 struct YMForwardMessageData {
     // 仅提供对齐存储。内部含 string/shared_ptr/容器，必须通过原生构造、转换和析构管理。
-    uintptr_t words[0x340 / sizeof(uintptr_t)];
+    uintptr_t words[0x350 / sizeof(uintptr_t)];
 };
+
+static BOOL YMForwardUses270102MessageData(void) {
+    return [[[NSBundle mainBundle] objectForInfoDictionaryKey:@"CFBundleVersion"] isEqualToString:@"270102"];
+}
 
 struct YMForwardTargets {
     // 269079 原生上下文布局；key=2 是普通微信目标，另外两项保持为空。
@@ -404,13 +408,14 @@ static BOOL YMForwardNoticeToSelf(NSString *selfId, NSString *content) {
         uint8_t *data = (uint8_t *)message.get();
         const uint32_t textType = 1;
         memcpy(data + 8, &textType, sizeof(textType));
-        // 269079: 48e0f90 初始化完整对象；484f234 / 5167ac 确认正文为 +0xb0 的 string。
+        // 269079 正文为 +0xb0；270102 在其前方新增 8 字节字段，正文移到 +0xb8。
         // 27ac014 为发送生成新 Wrap/身份；27c1058..27c106c 将 Data+0xb0 赋给 Wrap+0x130。
         // 新通知不借用原消息的 ID、扩展对象或媒体字段，也不按 ID 重查原文。
         *(std::string *)(data + 0x28) = recipientUTF8;
         *(std::string *)(data + 0x40) = recipientUTF8;
         *(std::string *)(data + 0x58) = recipientUTF8;
-        ((std::string *)(data + 0xb0))->assign(contentUTF8, [content lengthOfBytesUsingEncoding:NSUTF8StringEncoding]);
+        ((std::string *)(data + (YMForwardUses270102MessageData() ? 0xb8 : 0xb0)))
+            ->assign(contentUTF8, [content lengthOfBytesUsingEncoding:NSUTF8StringEncoding]);
         return YMSubmitMessageToSession(message.get(), selfId, addresses);
     } catch (...) {
         YMForwardLog(@"native notice construction failed");

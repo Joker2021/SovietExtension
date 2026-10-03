@@ -23,6 +23,11 @@ static NSMenuItem *YMAssistantMenuItem;
 static NSMenu *YMHostHelpMenu;
 static NSMenu *YMHostWindowsMenu;
 
+static BOOL YMUsesSeparatedRevokePolicy(void) {
+    NSString *build = [[NSBundle mainBundle] objectForInfoDictionaryKey:@"CFBundleVersion"];
+    return [build isEqualToString:@"269079"] || [build isEqualToString:@"270102"];
+}
+
 // 269079 在启动延迟回调中按末尾两项指定窗口/帮助；仅纠正助手插入造成的误指定。
 static void YMProtectAssistantMenuRole(void) {
     static dispatch_once_t onceToken;
@@ -79,7 +84,7 @@ static void YMProtectAssistantMenuRole(void) {
                                                               key:kAntiUpdate
                                                            action:@selector(onAntiUpdate:)];
     
-    BOOL separateRevoke = [[[NSBundle mainBundle] objectForInfoDictionaryKey:@"CFBundleVersion"] isEqualToString:@"269079"];
+    BOOL separateRevoke = YMUsesSeparatedRevokePolicy();
     NSMenu *revokeGroupSub = [[NSMenu alloc] initWithTitle:@"消息撤回"];
     [revokeGroupSub addItem:[self ym_toggleMenuItemWithTitle:@"消息防撤回"
         key:separateRevoke ? kRevokeEnabled : kAntiRevoke action:@selector(onRevokeEnabled:)]];
@@ -199,7 +204,7 @@ static void YMProtectAssistantMenuRole(void) {
 
 - (void)onRevokeEnabled:(NSMenuItem *)item
 {
-    if (![[[NSBundle mainBundle] objectForInfoDictionaryKey:@"CFBundleVersion"] isEqualToString:@"269079"]) {
+    if (!YMUsesSeparatedRevokePolicy()) {
         [self onAntiRevoke:item];
         return;
     }
@@ -411,7 +416,7 @@ static void YMProtectAssistantMenuRole(void) {
     
     NSUserDefaults *defaults = [NSUserDefaults standardUserDefaults];
     [defaults setBool:enabled forKey:key];
-    if ([[[NSBundle mainBundle] objectForInfoDictionaryKey:@"CFBundleVersion"] isEqualToString:@"269079"]) {
+    if (YMUsesSeparatedRevokePolicy()) {
         for (NSArray<NSString *> *group in @[@[kRevokeEnabled, kAntiRevoke, kSelfAntiRevoke],
                                             @[kRevokeForwardToSelfRealSend, kRevokeForwardOthers, kRevokeForwardSelf]]) {
             if (![group containsObject:key]) continue;
