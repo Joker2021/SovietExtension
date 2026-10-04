@@ -9,7 +9,6 @@
 #import <mach/mach.h>
 #import <mach/mach_vm.h>
 #import <mach-o/dyld.h>
-#import <mach-o/utils.h>
 #import <os/log.h>
 #import <sys/mman.h>
 
@@ -2425,6 +2424,20 @@ YMNavigationSidebarBuildDiagnosticPatchContext(
 
 #pragma mark - 镜像识别与安装
 
+static const char *YMNavigationSidebarArchitectureName(
+    const struct mach_header *header) noexcept {
+    if (header == nullptr) {
+        return nullptr;
+    }
+    if (header->cputype == CPU_TYPE_ARM64) {
+        return "arm64";
+    }
+    if (header->cputype == CPU_TYPE_X86_64) {
+        return "x86_64";
+    }
+    return nullptr;
+}
+
 static BOOL YMNavigationSidebarCurrentBuildMatches(
     const struct mach_header *header) {
     NSBundle *bundle = NSBundle.mainBundle;
@@ -2434,9 +2447,7 @@ static BOOL YMNavigationSidebarCurrentBuildMatches(
     NSString *buildVersion =
         [bundle objectForInfoDictionaryKey:@"CFBundleVersion"] ?: @"";
     const char *architecture =
-        header != nullptr
-            ? macho_arch_name_for_cpu_type(header->cputype, header->cpusubtype)
-            : nullptr;
+        YMNavigationSidebarArchitectureName(header);
     return YMNavigationSidebarProfileMatches(YMNavigationSidebarProfile,
                                              bundleIdentifier.UTF8String,
                                              shortVersion.UTF8String,
@@ -2559,7 +2570,7 @@ YMNavigationSidebarRunComponentPreflight(
     NSString *buildVersion =
         [bundle objectForInfoDictionaryKey:@"CFBundleVersion"] ?: @"";
     const char *architecture =
-        macho_arch_name_for_cpu_type(header->cputype, header->cpusubtype);
+        YMNavigationSidebarArchitectureName(header);
     const YMSidebarPatchLoadedImage image = {
         path,
         reinterpret_cast<std::uintptr_t>(header),

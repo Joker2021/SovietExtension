@@ -15,6 +15,8 @@ set -euo pipefail
 APP_NAME="WeChat"
 FRAMEWORK_NAME="${FRAMEWORK_NAME:-SovietExtension}"
 APP_PATH="/Applications/${APP_NAME}.app"
+STANDARD_APP_PATH="/Applications/${APP_NAME}.app"
+IS_SYSTEM_APP=0
 FORCE=0
 WRITE_INSTALL_STATE=1
 RUN_SUDO=0
@@ -25,11 +27,16 @@ APP_SHORT_VERSION=""
 APP_BUILD_VERSION=""
 MATCHED_DISPLAY_VERSION=""
 MATCHED_LINE=""
+MATCHED_FAT_SHA256=""
+MATCHED_ARM64_UUID=""
 BACKUP_PATH=""
+BACKUP_DIR=""
 HOST_ARCH=""
 INSERT_DYLIB_PATH=""
 INSERT_DYLIB_RUNNER=""
 INSERT_DYLIB_RUN_MODE=""
+INSTALL_ROLLBACK_READY=0
+INSTALL_COMPLETED=0
 
 # ------------------------------
 # log helpers
@@ -63,7 +70,7 @@ Usage:
   ./install.sh --app=/Applications/WeChat.app
 
 Options:
-  --force              Ignore version check and install anyway / 忽略版本检查，强制安装
+  --force              Allow an unlisted version; exact known-profile checks still apply / 允许未列出的版本；已知 profile 的精确校验仍会执行
   --no-install-state   Skip writing install state / 不写安装记录
   --app=PATH           Specify WeChat.app path / 指定 WeChat.app 路径
   --framework=NAME     Specify framework name, default: SovietExtension / 指定插件名，默认 SovietExtension
@@ -118,12 +125,27 @@ for arg in "$@"; do
     esac
 done
 
+if [[ ! "${FRAMEWORK_NAME}" =~ ^[A-Za-z0-9][A-Za-z0-9_-]*$ ]]; then
+    die "Invalid framework name / 插件名只能包含字母、数字、下划线和连字符，且必须以字母或数字开头: ${FRAMEWORK_NAME}"
+fi
+
 APP_PATH="${APP_PATH%/}"
+[ -n "${APP_PATH}" ] || die "App path must not be empty / App 路径不能为空"
+if [ -d "${APP_PATH}" ]; then
+    APP_PATH="$(cd "${APP_PATH}" && pwd -P)" || die "Cannot resolve App path / 无法解析 App 物理路径: ${APP_PATH}"
+fi
+if [ -d "${STANDARD_APP_PATH}" ]; then
+    STANDARD_APP_PATH="$(cd "${STANDARD_APP_PATH}" && pwd -P)" || die "Cannot resolve system WeChat path / 无法解析系统微信物理路径"
+fi
+if [ "${APP_PATH}" = "${STANDARD_APP_PATH}" ]; then
+    IS_SYSTEM_APP=1
+fi
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 MACOS_PATH="${APP_PATH}/Contents/MacOS"
 INFO_PLIST="${APP_PATH}/Contents/Info.plist"
 APP_EXECUTABLE_PATH="${MACOS_PATH}/${APP_NAME}"
+BACKUP_DIR="${APP_PATH}.${FRAMEWORK_NAME}Backup"
 
 PLUGIN_SRC_PATH="${PLUGIN_SRC_PATH:-${SCRIPT_DIR}/Plugin/${FRAMEWORK_NAME}.framework}"
 PLUGIN_SRC_BINARY_PATH="${PLUGIN_SRC_PATH}/${FRAMEWORK_NAME}"
@@ -172,6 +194,10 @@ check_required_commands() {
 
     command_required /usr/libexec/PlistBuddy
     command_required cp
+    command_required cmp
+    command_required mkdir
+    command_required mktemp
+    command_required mv
     command_required rm
     command_required chmod
     command_required ditto
@@ -181,6 +207,7 @@ check_required_commands() {
     command_required file
     command_required grep
     command_required sed
+    command_required awk
     command_required uname
     command_required pkill
     command_required pgrep
@@ -297,6 +324,15 @@ check_basic_files() {
 
     [ -f "${SUPPORTED_FILE}" ] || die "supported_versions.txt not found / 找不到版本控制文件: ${SUPPORTED_FILE}"
 
+    [ ! -L "${BACKUP_DIR}" ] || die "Backup directory must not be a symbolic link / 备份目录不能是符号链接: ${BACKUP_DIR}"
+    if [ -e "${BACKUP_DIR}" ] && [ ! -d "${BACKUP_DIR}" ]; then
+        die "Backup directory path is not a directory / 备份目录路径不是目录: ${BACKUP_DIR}"
+    fi
+    [ ! -L "${STATE_FILE}" ] || die "Install state must not be a symbolic link / 安装状态文件不能是符号链接: ${STATE_FILE}"
+    if [ -e "${STATE_FILE}" ] && [ ! -f "${STATE_FILE}" ]; then
+        die "Install state path is not a regular file / 安装状态路径不是普通文件: ${STATE_FILE}"
+    fi
+
     # Resolve symlinks before copy_framework can remove the destination.
     local source_dir destination_dir
     source_dir="$(cd "${PLUGIN_SRC_PATH}" && pwd -P)"
@@ -399,9 +435,10 @@ check_arch_compatibility() {
     # 对普通用户分发时，强烈建议插件做 universal。
     if binary_contains_arch "${APP_EXECUTABLE_PATH}" "${HOST_ARCH}"; then
         if ! binary_contains_arch "${PLUGIN_SRC_BINARY_PATH}" "${HOST_ARCH}"; then
-            warn "Plugin framework may not support host arch ${HOST_ARCH} / 插件可能不支持当前机器架构 ${HOST_ARCH}"
-            warn "If WeChat fails to launch, rebuild framework as universal / 如果微信启动失败，请把插件重新编译为 universal"
+            die "Plugin framework does not support host arch ${HOST_ARCH} / 插件不支持当前机器架构 ${HOST_ARCH}，拒绝安装"
         fi
+    else
+        die "WeChat executable does not support host arch ${HOST_ARCH} / 微信主程序不支持当前机器架构 ${HOST_ARCH}"
     fi
 
     ok "Architecture pre-check finished / 架构预检查完成"
@@ -420,6 +457,8 @@ check_supported_version() {
 
     MATCHED_DISPLAY_VERSION=""
     MATCHED_LINE=""
+    MATCHED_FAT_SHA256=""
+    MATCHED_ARM64_UUID=""
 
     echo ""
     info "Detected WeChat version / 检测到微信版本:"
@@ -427,11 +466,13 @@ check_supported_version() {
     echo "    CFBundleVersion:            ${APP_BUILD_VERSION}"
     echo ""
 
-    while IFS='|' read -r f1 f2 f3 f4 rest || [ -n "${f1:-}" ]; do
+    while IFS='|' read -r f1 f2 f3 f4 f5 f6 rest || [ -n "${f1:-}" ]; do
         f1="$(trim "${f1:-}")"
         f2="$(trim "${f2:-}")"
         f3="$(trim "${f3:-}")"
         f4="$(trim "${f4:-}")"
+        f5="$(trim "${f5:-}")"
+        f6="$(trim "${f6:-}")"
 
         [ -z "${f1}" ] && continue
         [[ "${f1}" == \#* ]] && continue
@@ -440,14 +481,18 @@ check_supported_version() {
         local short_version=""
         local build_version=""
         local note=""
+        local fat_sha256=""
+        local arm64_uuid=""
 
-        # 新格式：DisplayVersion|CFBundleShortVersionString|CFBundleVersion|Note
+        # 新格式：DisplayVersion|CFBundleShortVersionString|CFBundleVersion|Note|FatSHA256|Arm64UUID
         # 兼容旧格式：CFBundleShortVersionString|CFBundleVersion|Note
         if [ -n "${f3}" ] && is_build_token "${f3}"; then
             display_version="${f1}"
             short_version="${f2}"
             build_version="${f3}"
             note="${f4}"
+            fat_sha256="${f5}"
+            arm64_uuid="${f6}"
         else
             display_version="${f1}"
             short_version="${f1}"
@@ -462,6 +507,8 @@ check_supported_version() {
            { [ "${build_version}" = "${APP_BUILD_VERSION}" ] || [ "${build_version}" = "*" ]; }; then
             MATCHED_DISPLAY_VERSION="${display_version}"
             MATCHED_LINE="${display_version}|${short_version}|${build_version}|${note}"
+            MATCHED_FAT_SHA256="${fat_sha256}"
+            MATCHED_ARM64_UUID="${arm64_uuid}"
             break
         fi
     done < "${SUPPORTED_FILE}"
@@ -472,7 +519,7 @@ check_supported_version() {
         echo "    Matched Rule:              ${MATCHED_LINE}"
         echo ""
 
-        BACKUP_PATH="${APP_EXECUTABLE_PATH}.backup.${MATCHED_DISPLAY_VERSION}.${APP_BUILD_VERSION}"
+        BACKUP_PATH="${BACKUP_DIR}/${APP_NAME}.backup.${MATCHED_DISPLAY_VERSION}.${APP_BUILD_VERSION}"
         return 0
     fi
 
@@ -484,7 +531,7 @@ check_supported_version() {
     echo "    4.1.9.58|${APP_SHORT_VERSION}|${APP_BUILD_VERSION}|Tested"
     echo ""
 
-    BACKUP_PATH="${APP_EXECUTABLE_PATH}.backup.${APP_SHORT_VERSION}.${APP_BUILD_VERSION}"
+    BACKUP_PATH="${BACKUP_DIR}/${APP_NAME}.backup.${APP_SHORT_VERSION}.${APP_BUILD_VERSION}"
 
     if [ "${FORCE}" -eq 1 ]; then
         warn "Force mode enabled, continue anyway / 已使用 --force，继续安装"
@@ -502,14 +549,62 @@ check_supported_version() {
     esac
 }
 
+check_exact_binary_profile() {
+    if [ -z "${MATCHED_FAT_SHA256}" ] && [ -z "${MATCHED_ARM64_UUID}" ]; then
+        warn "Matched version has no exact binary gate / 当前版本规则没有精确二进制门禁"
+        return 0
+    fi
+
+    [ -n "${MATCHED_FAT_SHA256}" ] && [ -n "${MATCHED_ARM64_UUID}" ] || \
+        die "Incomplete exact binary profile / 精确二进制规则缺少 SHA-256 或 arm64 UUID"
+
+    command_required shasum
+    command_required dwarfdump
+    command_required tr
+
+    local target_dylib="${APP_PATH}/Contents/Resources/wechat.dylib"
+    local actual_sha256=""
+    local uuid_output=""
+    local actual_arm64_uuid=""
+    local expected_sha256=""
+    local expected_arm64_uuid=""
+
+    [ -f "${target_dylib}" ] || die "Target wechat.dylib not found / 找不到目标 wechat.dylib: ${target_dylib}"
+
+    info "Verify exact WeChat binary profile / 校验精确微信二进制样本..."
+    expected_sha256="$(printf '%s' "${MATCHED_FAT_SHA256}" | tr '[:upper:]' '[:lower:]')"
+    actual_sha256="$(shasum -a 256 "${target_dylib}" | awk '{print $1}')" || \
+        die "Failed to hash target wechat.dylib / 无法计算目标 wechat.dylib 的 SHA-256"
+    actual_sha256="$(printf '%s' "${actual_sha256}" | tr '[:upper:]' '[:lower:]')"
+    [ "${actual_sha256}" = "${expected_sha256}" ] || \
+        die "Target wechat.dylib SHA-256 mismatch / 目标 wechat.dylib SHA-256 不匹配（expected ${expected_sha256}, got ${actual_sha256}）"
+
+    uuid_output="$(dwarfdump --uuid "${target_dylib}" 2>/dev/null)" || \
+        die "Failed to read target Mach-O UUID / 无法读取目标 Mach-O UUID"
+    actual_arm64_uuid="$(printf '%s\n' "${uuid_output}" | awk '$1 == "UUID:" && $3 == "(arm64)" {print $2}')"
+    expected_arm64_uuid="$(printf '%s' "${MATCHED_ARM64_UUID}" | tr '[:lower:]' '[:upper:]')"
+    actual_arm64_uuid="$(printf '%s' "${actual_arm64_uuid}" | tr '[:lower:]' '[:upper:]')"
+    [ "${actual_arm64_uuid}" = "${expected_arm64_uuid}" ] || \
+        die "Target arm64 UUID mismatch / 目标 arm64 UUID 不匹配（expected ${expected_arm64_uuid}, got ${actual_arm64_uuid:-missing-or-duplicate}）"
+
+    ok "Exact binary profile verified / 精确二进制样本校验通过"
+    echo "    wechat.dylib SHA-256: ${actual_sha256}"
+    echo "    arm64 UUID:           ${actual_arm64_uuid}"
+    echo ""
+}
+
 # ------------------------------
 # install steps
 # ------------------------------
 
 prepare_sudo() {
     RUN_SUDO=0
+    local app_parent_path=""
 
-    if [ ! -w "${MACOS_PATH}" ] || [ ! -w "${APP_EXECUTABLE_PATH}" ]; then
+    app_parent_path="$(dirname "${APP_PATH}")"
+
+    if [ ! -w "${MACOS_PATH}" ] || [ ! -w "${APP_EXECUTABLE_PATH}" ] || [ ! -w "${app_parent_path}" ] || \
+       { [ -d "${BACKUP_DIR}" ] && [ ! -w "${BACKUP_DIR}" ]; }; then
         RUN_SUDO=1
         info "Administrator permission required / 需要管理员权限，准备申请 sudo..."
         sudo -v
@@ -518,6 +613,11 @@ prepare_sudo() {
 
 quit_wechat() {
     info "Quit WeChat / 退出微信..."
+
+    if [ "${IS_SYSTEM_APP}" -ne 1 ]; then
+        warn "Custom app path: skip global WeChat process control; make sure this copy is not running / 自定义 App 路径：不操作系统微信进程，请确认该副本未运行"
+        return 0
+    fi
 
     osascript -e 'tell application "WeChat" to quit' >/dev/null 2>&1 || true
     sleep 1
@@ -550,46 +650,114 @@ remove_quarantine() {
 
 is_executable_injected() {
     local executable="$1"
+    local load_commands=""
 
-    [ -f "${executable}" ] || return 1
+    [ -f "${executable}" ] || return 2
+
+    load_commands="$(otool -l "${executable}" 2>/dev/null)" || return 2
 
     # pipefail 下 grep -q 提前退出可能使 otool 收到 SIGPIPE，导致已注入被误判为未注入。
-    # 读完整段输出并丢弃匹配文本，保留 otool 真正失败时的非零状态。
-    otool -l "${executable}" 2>/dev/null | grep "${LOAD_DYLIB_PATH}" >/dev/null && return 0
-    otool -l "${executable}" 2>/dev/null | grep "${FRAMEWORK_NAME}.framework/${FRAMEWORK_NAME}" >/dev/null && return 0
+    # 先完整读取 otool 输出，再匹配加载项；otool 失败时返回 2，不能当成干净文件。
+    printf '%s\n' "${load_commands}" | grep -F "${LOAD_DYLIB_PATH}" >/dev/null && return 0
+    printf '%s\n' "${load_commands}" | grep -F "${FRAMEWORK_NAME}.framework/${FRAMEWORK_NAME}" >/dev/null && return 0
 
     return 1
+}
+
+is_executable_clean() {
+    local status=0
+
+    if is_executable_injected "$1"; then
+        return 1
+    else
+        status="$?"
+    fi
+
+    [ "${status}" -eq 1 ]
+}
+
+macho_uuids() {
+    local executable="$1"
+    otool -l "${executable}" 2>/dev/null | awk '$1 == "uuid" {print $2}' | sort
+}
+
+same_macho_uuids() {
+    local left="$1"
+    local right="$2"
+    local left_uuids="" right_uuids=""
+
+    left_uuids="$(macho_uuids "${left}")" || left_uuids=""
+    right_uuids="$(macho_uuids "${right}")" || right_uuids=""
+
+    [ -n "${left_uuids}" ] && [ "${left_uuids}" = "${right_uuids}" ]
 }
 
 backup_executable() {
     info "Backup original executable / 备份微信主可执行文件..."
 
+    [ ! -L "${BACKUP_DIR}" ] || die "Backup directory must not be a symbolic link / 备份目录不能是符号链接: ${BACKUP_DIR}"
+    run_cmd mkdir -p "${BACKUP_DIR}"
+
+    [ ! -L "${BACKUP_PATH}" ] || die "Backup must not be a symbolic link / 备份文件不能是符号链接: ${BACKUP_PATH}"
+    if [ -e "${BACKUP_PATH}" ] && [ ! -f "${BACKUP_PATH}" ]; then
+        die "Backup path exists but is not a regular file / 备份路径已存在但不是普通文件: ${BACKUP_PATH}"
+    fi
+
     if [ -f "${BACKUP_PATH}" ]; then
-        if is_executable_injected "${BACKUP_PATH}"; then
-            die "Backup exists but already injected / 备份文件已存在，但看起来已经被注入过。请删除错误备份或重新安装微信: ${BACKUP_PATH}"
+        is_executable_clean "${BACKUP_PATH}" || die "Backup is injected or cannot be inspected / 备份文件已注入或无法完整检查，请先移走并重新安装微信: ${BACKUP_PATH}"
+
+        if ! same_macho_uuids "${APP_EXECUTABLE_PATH}" "${BACKUP_PATH}"; then
+            die "Backup UUID does not match current WeChat / 备份与当前微信 UUID 不一致，请先移走旧备份: ${BACKUP_PATH}"
         fi
 
         ok "Backup already exists / 备份已存在: ${BACKUP_PATH}"
         return 0
     fi
 
-    if is_executable_injected "${APP_EXECUTABLE_PATH}"; then
-        # Older Xcode installs used this name. Reuse only a clean copy of this binary.
-        local legacy_backup="${APP_EXECUTABLE_PATH}_backup"
+    if ! is_executable_clean "${APP_EXECUTABLE_PATH}"; then
+        if ! is_executable_injected "${APP_EXECUTABLE_PATH}"; then
+            die "Cannot inspect current WeChat executable / 无法检查当前微信主程序的加载项"
+        fi
+
+        # Older installers kept backups inside the app bundle. Move only a clean,
+        # UUID-matching copy outside the bundle so deep signing cannot rewrite it.
+        local legacy_backup=""
+        local candidate=""
         local current_uuids="" legacy_uuids=""
-        if [ -f "${legacy_backup}" ] && ! is_executable_injected "${legacy_backup}"; then
-            current_uuids="$(otool -l "${APP_EXECUTABLE_PATH}" | awk '$1 == "uuid" {print $2}' | sort)" || current_uuids=""
-            legacy_uuids="$(otool -l "${legacy_backup}" | awk '$1 == "uuid" {print $2}' | sort)" || legacy_uuids=""
+
+        current_uuids="$(otool -l "${APP_EXECUTABLE_PATH}" | awk '$1 == "uuid" {print $2}' | sort)" || current_uuids=""
+
+        for candidate in "${APP_EXECUTABLE_PATH}_backup" "${APP_EXECUTABLE_PATH}.backup."*; do
+            [ -f "${candidate}" ] || continue
+            [ ! -L "${candidate}" ] || continue
+            is_executable_clean "${candidate}" || continue
+
+            legacy_backup="${candidate}"
+            legacy_uuids="$(macho_uuids "${legacy_backup}")" || legacy_uuids=""
             if [ -n "${current_uuids}" ] && [ "${current_uuids}" = "${legacy_uuids}" ]; then
-                run_cmd cp -p "${legacy_backup}" "${BACKUP_PATH}"
+                INSTALL_ROLLBACK_READY=1
+                run_cmd mv "${legacy_backup}" "${BACKUP_PATH}"
                 ok "Migrated clean Xcode backup / 已迁移匹配当前程序的干净 Xcode 备份"
                 return 0
             fi
-        fi
+        done
         die "WeChat executable is already injected, but clean backup is missing / 当前微信主程序已被注入，但没有干净备份。请先重新安装微信或恢复原版"
     fi
 
-    run_cmd cp -p "${APP_EXECUTABLE_PATH}" "${BACKUP_PATH}"
+    local temporary_backup=""
+    temporary_backup="$(run_cmd mktemp "${BACKUP_PATH}.partial.XXXXXX")" || die "Failed to allocate temporary backup / 无法创建临时备份文件"
+
+    if ! run_cmd cp -p "${APP_EXECUTABLE_PATH}" "${temporary_backup}" || \
+       ! run_cmd cmp -s "${APP_EXECUTABLE_PATH}" "${temporary_backup}"; then
+        run_cmd rm -f "${temporary_backup}" || true
+        die "Backup copy verification failed / 备份复制校验失败，未写入正式备份"
+    fi
+
+    if ! run_cmd mv "${temporary_backup}" "${BACKUP_PATH}"; then
+        run_cmd rm -f "${temporary_backup}" || true
+        die "Failed to publish verified backup / 无法保存已校验的正式备份"
+    fi
+
     ok "Backup created / 已创建备份: ${BACKUP_PATH}"
 }
 
@@ -598,9 +766,9 @@ restore_clean_executable() {
 
     [ -f "${BACKUP_PATH}" ] || die "Backup not found / 备份不存在: ${BACKUP_PATH}"
 
-    if is_executable_injected "${BACKUP_PATH}"; then
-        die "Backup is already injected / 备份文件不干净，已包含插件注入项: ${BACKUP_PATH}"
-    fi
+    [ ! -L "${BACKUP_PATH}" ] || die "Backup must not be a symbolic link / 备份文件不能是符号链接: ${BACKUP_PATH}"
+    is_executable_clean "${BACKUP_PATH}" || die "Backup is injected or cannot be inspected / 备份文件已注入或无法完整检查: ${BACKUP_PATH}"
+    same_macho_uuids "${APP_EXECUTABLE_PATH}" "${BACKUP_PATH}" || die "Backup UUID does not match current WeChat / 备份与当前微信 UUID 不一致: ${BACKUP_PATH}"
 
     run_cmd cp -p "${BACKUP_PATH}" "${APP_EXECUTABLE_PATH}"
     run_cmd chmod +x "${APP_EXECUTABLE_PATH}"
@@ -676,43 +844,114 @@ insert_framework() {
 }
 
 sign_app() {
-    info "Code sign plugin framework / 签名插件 framework..."
+    info "Ad-hoc code sign plugin framework / 对插件 framework 执行 ad-hoc 签名..."
     run_cmd codesign --force --deep --sign - --timestamp=none "${FRAMEWORK_DST_PATH}"
 
-    info "Code sign WeChatAppEx if exists / 如果存在则签名 WeChatAppEx..."
-    APP_EX_PATH="${MACOS_PATH}/WeChatAppEx.app"
+    sign_embedded_and_main_app
+}
 
-    if [ -d "${APP_EX_PATH}" ]; then
-        run_cmd xattr -rd com.apple.quarantine "${APP_EX_PATH}" >/dev/null 2>&1 || true
-        run_cmd codesign --force --deep --sign - --timestamp=none "${APP_EX_PATH}" || true
+sign_embedded_and_main_app() {
+    local app_ex_path="${MACOS_PATH}/WeChatAppEx.app"
+    local weapp_path=""
 
-        WEAPP_PATH="${APP_EX_PATH}/Contents/Frameworks/WeChatAppEx Framework.framework/Versions/C/Helpers/WeApp.app"
-        if [ -d "${WEAPP_PATH}" ]; then
-            run_cmd codesign --force --deep --sign - --timestamp=none "${WEAPP_PATH}" || true
+    info "Ad-hoc code sign WeChatAppEx if exists / 如果存在则对 WeChatAppEx 执行 ad-hoc 签名..."
+
+    if [ -d "${app_ex_path}" ]; then
+        run_cmd xattr -rd com.apple.quarantine "${app_ex_path}" >/dev/null 2>&1 || true
+        run_cmd codesign --force --deep --sign - --timestamp=none "${app_ex_path}" || true
+
+        weapp_path="${app_ex_path}/Contents/Frameworks/WeChatAppEx Framework.framework/Versions/C/Helpers/WeApp.app"
+        if [ -d "${weapp_path}" ]; then
+            run_cmd codesign --force --deep --sign - --timestamp=none "${weapp_path}" || true
         fi
     fi
 
-    info "Code sign main WeChat.app / 签名主 WeChat.app..."
+    info "Ad-hoc code sign main WeChat.app / 对主 WeChat.app 执行 ad-hoc 签名..."
     run_cmd codesign --force --deep --sign - --timestamp=none "${APP_PATH}"
 
-    ok "Code sign finished / 签名完成"
+    ok "Ad-hoc code sign finished / ad-hoc 签名完成"
+}
+
+rollback_install_on_exit() {
+    local status="$1"
+    local clean_state=0
+
+    if [ "${status}" -eq 0 ] || [ "${INSTALL_ROLLBACK_READY}" -ne 1 ] || [ "${INSTALL_COMPLETED}" -eq 1 ]; then
+        return 0
+    fi
+
+    trap - EXIT
+    set +e
+
+    warn "Installation failed; restore the clean executable and remove partial files / 安装失败，开始恢复干净主程序并清理未完成内容"
+
+    if [ -f "${BACKUP_PATH}" ] && [ ! -L "${BACKUP_PATH}" ] && \
+       is_executable_clean "${BACKUP_PATH}" && \
+       same_macho_uuids "${APP_EXECUTABLE_PATH}" "${BACKUP_PATH}"; then
+        if run_cmd cp -p "${BACKUP_PATH}" "${APP_EXECUTABLE_PATH}" && \
+           run_cmd chmod +x "${APP_EXECUTABLE_PATH}" && \
+           is_executable_clean "${APP_EXECUTABLE_PATH}"; then
+            clean_state=1
+        fi
+    elif is_executable_clean "${APP_EXECUTABLE_PATH}"; then
+        clean_state=1
+    fi
+
+    if [ "${clean_state}" -eq 1 ]; then
+        run_cmd rm -rf "${FRAMEWORK_DST_PATH}"
+        run_cmd rm -f "${STATE_FILE}"
+        sign_embedded_and_main_app
+    else
+        warn "Clean executable was not restored; keep framework and state to avoid breaking an injected executable / 未能恢复干净主程序，保留 framework 和状态文件，避免已注入程序缺少依赖"
+    fi
+
+    if [ "${clean_state}" -eq 1 ] && is_executable_clean "${APP_EXECUTABLE_PATH}" && codesign -vvv --deep --strict "${APP_PATH}" >/dev/null 2>&1; then
+        ok "Failure recovery verified; backup kept / 安装失败恢复已验证，外置备份已保留"
+    else
+        warn "Automatic recovery could not be fully verified; keep the backup and reinstall official WeChat if needed / 自动恢复未能完整验证，请保留备份，必要时重装官方微信"
+    fi
+
+    exit "${status}"
 }
 
 write_state_file() {
+    local temporary_state=""
+    local state_contents=""
+
     info "Write install state / 写入安装状态..."
 
-    {
-        echo "framework=${FRAMEWORK_NAME}"
-        echo "display_version=${MATCHED_DISPLAY_VERSION:-unknown}"
-        echo "short_version=${APP_SHORT_VERSION}"
-        echo "build_version=${APP_BUILD_VERSION}"
-        echo "host_arch=${HOST_ARCH}"
-        echo "insert_dylib=${INSERT_DYLIB_PATH}"
-        echo "insert_dylib_run_mode=${INSERT_DYLIB_RUN_MODE}"
-        echo "backup=${BACKUP_PATH}"
-        echo "load_dylib=${LOAD_DYLIB_PATH}"
-        echo "installed_at=$(date '+%Y-%m-%d %H:%M:%S')"
-    } | run_cmd tee "${STATE_FILE}" >/dev/null
+    [ ! -L "${STATE_FILE}" ] || die "Install state must not be a symbolic link / 安装状态文件不能是符号链接: ${STATE_FILE}"
+    if [ -e "${STATE_FILE}" ] && [ ! -f "${STATE_FILE}" ]; then
+        die "Install state path is not a regular file / 安装状态路径不是普通文件: ${STATE_FILE}"
+    fi
+
+    temporary_state="$(run_cmd mktemp "${STATE_FILE}.partial.XXXXXX")" || die "Failed to allocate temporary install state / 无法创建临时安装状态文件"
+    state_contents="$(printf '%s\n' \
+        "framework=${FRAMEWORK_NAME}" \
+        "display_version=${MATCHED_DISPLAY_VERSION:-unknown}" \
+        "short_version=${APP_SHORT_VERSION}" \
+        "build_version=${APP_BUILD_VERSION}" \
+        "host_arch=${HOST_ARCH}" \
+        "insert_dylib=${INSERT_DYLIB_PATH}" \
+        "insert_dylib_run_mode=${INSERT_DYLIB_RUN_MODE}" \
+        "backup=${BACKUP_PATH}" \
+        "load_dylib=${LOAD_DYLIB_PATH}" \
+        "installed_at=$(date '+%Y-%m-%d %H:%M:%S')")"
+
+    if ! printf '%s\n' "${state_contents}" | run_cmd tee "${temporary_state}" >/dev/null; then
+        run_cmd rm -f "${temporary_state}" || true
+        die "Failed to write install state / 写入安装状态失败"
+    fi
+
+    if ! run_cmd chmod 0644 "${temporary_state}"; then
+        run_cmd rm -f "${temporary_state}" || true
+        die "Failed to set install state permissions / 无法设置安装状态文件权限"
+    fi
+
+    if ! run_cmd mv "${temporary_state}" "${STATE_FILE}"; then
+        run_cmd rm -f "${temporary_state}" || true
+        die "Failed to publish install state / 无法保存安装状态"
+    fi
 
     ok "Install state saved / 安装状态已保存: ${STATE_FILE}"
 }
@@ -731,7 +970,7 @@ verify_install() {
     info "Verify code signature / 检查签名..."
 
     if codesign -vvv --deep --strict "${APP_PATH}" >/dev/null 2>&1; then
-        ok "Code signature verified / 签名验证通过"
+        ok "Ad-hoc deep signature verified / ad-hoc 深度签名验证通过"
     else
         die "Code signature verification failed / 签名验证失败，未清除权限"
     fi
@@ -739,6 +978,11 @@ verify_install() {
 
 reset_app_data_permission() {
     # Only the installed WeChat's container permission; never reset All or FDA.
+    if [ "${IS_SYSTEM_APP}" -ne 1 ]; then
+        warn "Custom app path: skip global TCC reset / 自定义 App 路径：不重置系统微信的全局 TCC 授权"
+        return 0
+    fi
+
     if [ "$(read_plist CFBundleIdentifier)" != "com.tencent.xinWeChat" ]; then
         warn "Not the standard WeChat bundle / 非标准微信标识，未清除数据访问权限"
         return 0
@@ -808,10 +1052,13 @@ check_basic_files
 select_insert_dylib
 check_arch_compatibility
 check_supported_version
+check_exact_binary_profile
 prepare_sudo
 quit_wechat
 remove_quarantine
+trap 'rollback_install_on_exit "$?"' EXIT
 backup_executable
+INSTALL_ROLLBACK_READY=1
 restore_clean_executable
 copy_framework
 insert_framework
@@ -820,5 +1067,6 @@ if [ "${WRITE_INSTALL_STATE}" -eq 1 ]; then
 fi
 sign_app
 verify_install
+INSTALL_COMPLETED=1
 reset_app_data_permission
 print_done

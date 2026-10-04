@@ -476,7 +476,9 @@ static NSColor *YMColorForDesignToken(YMSidebarSettingsColorToken token,
                                         font:YMFontForTypographyToken(
                                             YMSidebarTypographyPanelTitle)
                                         role:kYMSidebarSettingsLabelRoleTitle];
-    self.titleLabel.accessibilityRole = NSAccessibilityHeadingRole;
+    if (@available(macOS 26.0, *)) {
+        self.titleLabel.accessibilityRole = NSAccessibilityHeadingRole;
+    }
     [self.scrollDocumentView addSubview:self.titleLabel];
 
     self.subtitleLabel = [self ym_labelWithText:@"选择要显示的入口，并在各分组内调整顺序"

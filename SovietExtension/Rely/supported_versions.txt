@@ -2,7 +2,7 @@
 # SovietExtension 支持的 Mac WeChat 版本列表
 #
 # Format / 格式：
-# DisplayVersion|CFBundleShortVersionString|CFBundleVersion|Note
+# DisplayVersion|CFBundleShortVersionString|CFBundleVersion|Note|ResourcesFatSHA256|Arm64UUID
 #
 # 字段说明：
 # 1. DisplayVersion:
@@ -19,6 +19,14 @@
 # 4. Note:
 #    备注
 #
+# 5. ResourcesFatSHA256 (optional / 可选):
+#    WeChat.app/Contents/Resources/wechat.dylib 的完整 fat SHA-256
+#
+# 6. Arm64UUID (optional / 可选):
+#    上述 wechat.dylib 的 arm64 Mach-O UUID
+#
+# 同时填写第 5、6 项后，安装器会在修改 App 前强制精确匹配；--force 不会绕过。
+#
 # Example / 示例：
 # 4.1.9.58|4.1.9|268602|Tested
 #
@@ -28,4 +36,4 @@
 
 4.1.10.53|4.1.10|268853|Tested on Mac WeChat 4.1.10.53
 4.1.11.23|4.1.11|269079|Tested on Mac WeChat 4.1.11.23
-4.1.15|4.1.15|270102|Static ABI adaptation; runtime account test pending
+4.1.15|4.1.15|270102|Exact SHA/UUID sample: artifact and isolated install/uninstall verified; runtime account test pending|d89434bb90b65991aa35a32e6b48a5825b0b1906e7142b12387c32fd76996b94|3B7B6ABB-2C36-3E58-A384-CDEF05A57AA5
