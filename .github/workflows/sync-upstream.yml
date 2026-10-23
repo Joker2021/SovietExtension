@@ -26,13 +26,7 @@ jobs:
             exit 0
           fi
           issue=$(gh issue list --repo "$GITHUB_REPOSITORY" --state open --json number,title --jq '.[] | select(.title == "上游同步通知（自动）") | .number' | head -n 1)
-          body=$(printf '%s\\n' \\
-            '@Joker2021 检测到上游更新，已完成同步。' \\
-            '' \\
-            "- 仓库：${GITHUB_REPOSITORY}" \\
-            "- 分支：${branch}" \\
-            "- 变更：${before:0:7} → ${after:0:7}" \\
-            "- 工作流：[查看运行记录](${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID})")
+          body=$(printf '%s\n' '@Joker2021 检测到上游更新，已完成同步。' '' "- 仓库：${GITHUB_REPOSITORY}" "- 分支：${branch}" "- 变更：${before:0:7} → ${after:0:7}" "- 工作流：[查看运行记录](${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID})")
           if [ -n "$issue" ]; then
             gh issue comment "$issue" --repo "$GITHUB_REPOSITORY" --body "$body"
           else
